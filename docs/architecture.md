@@ -16,7 +16,7 @@ Instead of running inside a browser extension sandbox (Manifest V3) or bundling 
 
 ### 2.2 AI Orchestration & Prompt Layer
 
-- **Provider support**: Connect to local OpenAI-compatible or Ollama endpoints (`http://localhost:11434`) as first-class providers, with optional cloud API keys for higher-accuracy grammar analysis.
+- **Provider support**: Support both local OpenAI-compatible / Ollama endpoints (`http://localhost:11434`) and cloud API providers on equal footing as first-class providers.
 - **Grammar analysis prompt**: Built from `prompts/SKILL.md`, `prompts/workflows.md`, `prompts/teaching-method.md`, and `prompts/book-caveats.md`.
 - **Textbook retrieval**: Because a standalone desktop app does not run an agent file-reading loop, perform lightweight local keyword/BM25 lookup against `knowledge/book/index.md` and `knowledge/book/chapters/` before sending the prompt, and always include high-frequency rules from `prompts/book-caveats.md`.
 

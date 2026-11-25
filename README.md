@@ -13,7 +13,7 @@ This project combines two sources:
 - **Trigger mechanism**: Global hotkey + simulated copy (`Cmd+C` / `Ctrl+C`) + clipboard restore + always-on-top floating window near the cursor.
 - **Card rendering**: Adopt `read-frog` Custom AI Actions style user-editable HTML/CSS templates with flat JSON fields, sanitized with `DOMPurify` and isolated with Shadow DOM or scoped CSS.
 - **Dropped components**: `Presentation Record v1`, `assets/archify-native/`, `render_structure_archify.py`, and `render_structure_svg.py` are intentionally excluded. No Python or Node.js runtime is bundled in the desktop app.
-- **LLM & storage**: Support local LLMs (Ollama, LM Studio) as first-class providers alongside optional cloud APIs, with local SQLite (`tauri-plugin-sql`) for action templates, history, and optional FSRS review.
+- **LLM & storage**: Support both local LLMs (Ollama, LM Studio) and cloud APIs as equal first-class providers, with local SQLite (`tauri-plugin-sql`) for action templates, history, and optional FSRS review.
 
 ## Directory Structure
 
