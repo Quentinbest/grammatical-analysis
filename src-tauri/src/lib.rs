@@ -111,7 +111,8 @@ pub fn run() {
                 .join("grammatical_analysis.db");
             let storage = Storage::open(&db_path)
                 .map_err(|err| Box::new(err) as Box<dyn std::error::Error>)?;
-            app.manage(AppState::new(Arc::new(storage)));
+            let resource_dir = app.path().resource_dir().ok();
+            app.manage(AppState::with_resource_dir(Arc::new(storage), resource_dir));
 
             for shortcut in [DEFAULT_HOTKEY, SECONDARY_HOTKEY] {
                 if let Err(err) = app.global_shortcut().register(shortcut) {

@@ -35,6 +35,7 @@ const MAX_PRE_CANCELLED_ENTRIES: usize = 64;
 
 pub struct AppState {
     pub storage: Arc<Storage>,
+    resource_dir: Option<PathBuf>,
     retriever: OnceLock<Option<Bm25BookRetriever>>,
     prompt_builder: OnceLock<Option<PromptBuilder>>,
     in_flight: Mutex<HashMap<String, InFlightEntry>>,
@@ -42,8 +43,13 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(storage: Arc<Storage>) -> Self {
+        Self::with_resource_dir(storage, None)
+    }
+
+    pub fn with_resource_dir(storage: Arc<Storage>, resource_dir: Option<PathBuf>) -> Self {
         Self {
             storage,
+            resource_dir,
             retriever: OnceLock::new(),
             prompt_builder: OnceLock::new(),
             in_flight: Mutex::new(HashMap::new()),
@@ -52,7 +58,7 @@ impl AppState {
 
     pub fn retrieve_context(&self, source_text: &str, limit: usize) -> Vec<RetrievalHit> {
         let retriever = self.retriever.get_or_init(|| {
-            resolve_resource_dir("knowledge/book")
+            resolve_resource_dir(self.resource_dir.as_deref(), "knowledge/book")
                 .and_then(|dir| load_default_retriever(&dir).ok())
         });
         match retriever {
@@ -64,7 +70,7 @@ impl AppState {
     fn prompt_builder(&self) -> Option<&PromptBuilder> {
         self.prompt_builder
             .get_or_init(|| {
-                resolve_resource_dir("prompts")
+                resolve_resource_dir(self.resource_dir.as_deref(), "prompts")
                     .and_then(|dir| PromptBuilder::from_dir(&dir, PromptConfig::default()).ok())
             })
             .as_ref()
@@ -129,8 +135,11 @@ impl Drop for InFlightGuard<'_> {
     }
 }
 
-fn resolve_resource_dir(relative: &str) -> Option<PathBuf> {
+fn resolve_resource_dir(runtime_resource_dir: Option<&Path>, relative: &str) -> Option<PathBuf> {
     let mut candidates = Vec::new();
+    if let Some(res_dir) = runtime_resource_dir {
+        candidates.push(res_dir.join(relative));
+    }
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join(relative));
         if let Some(parent) = cwd.parent() {
@@ -422,5 +431,20 @@ mod tests {
         state.register_in_flight("req-early-cancel", token.clone());
         assert!(token.is_cancelled());
         state.remove_in_flight("req-early-cancel");
+    }
+
+    #[test]
+    fn resolve_resource_dir_prefers_runtime_resource_dir() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "ga-resource-dir-test-{}",
+            std::process::id()
+        ));
+        let prompts_dir = temp_root.join("prompts");
+        std::fs::create_dir_all(&prompts_dir).expect("create temp prompts dir");
+
+        let resolved = resolve_resource_dir(Some(&temp_root), "prompts");
+        assert_eq!(resolved.as_deref(), Some(prompts_dir.as_path()));
+
+        let _ = std::fs::remove_dir_all(&temp_root);
     }
 }
