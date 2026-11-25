@@ -1,0 +1,657 @@
+import { type FormEvent, useEffect, useState } from "react";
+import {
+  type ActionId,
+  type CardId,
+  type CardTheme,
+  type CustomAction,
+  type ProviderConfig,
+  type ProviderId,
+  isActionId,
+  isProviderId,
+} from "../../domain/types.ts";
+import "./SettingsDrawer.css";
+
+export interface HistoryEntry {
+  readonly id: CardId;
+  readonly sourceText: string;
+  readonly providerId: ProviderId;
+  readonly actionId: ActionId;
+  readonly rawJson: string;
+  readonly latencyMs: number;
+  readonly createdAt: number;
+}
+
+export interface SettingsDrawerProps {
+  readonly isOpen: boolean;
+  readonly theme: CardTheme;
+  readonly providers: readonly ProviderConfig[];
+  readonly configuredKeyRefs: readonly string[];
+  readonly actions: readonly CustomAction[];
+  readonly history: readonly HistoryEntry[];
+  readonly onClose: () => void;
+  readonly onSaveProvider: (config: ProviderConfig, apiKey?: string) => Promise<void>;
+  readonly onSaveAction: (action: CustomAction) => Promise<void>;
+  readonly onSelectHistory: (entry: HistoryEntry) => void;
+  readonly onRefreshHistory: () => Promise<void>;
+}
+
+type DrawerTab = "providers" | "actions" | "history";
+type ProviderKind = ProviderConfig["kind"];
+type RenderMode = CustomAction["renderMode"];
+
+interface ProviderDraft {
+  readonly id: string;
+  readonly kind: ProviderKind;
+  readonly name: string;
+  readonly baseUrl: string;
+  readonly model: string;
+  readonly apiKeyRef: string;
+  readonly apiKeySecret: string;
+}
+
+interface ActionDraft {
+  readonly id: string;
+  readonly name: string;
+  readonly systemPrompt: string;
+  readonly isBuiltIn: boolean;
+  readonly renderMode: RenderMode;
+  readonly htmlTemplate: string;
+  readonly cssTemplate: string;
+}
+
+function providerToDraft(provider: ProviderConfig): ProviderDraft {
+  switch (provider.kind) {
+    case "ollama":
+      return {
+        id: provider.id,
+        kind: "ollama",
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        apiKeyRef: "",
+        apiKeySecret: "",
+      };
+    case "openai-compatible":
+      return {
+        id: provider.id,
+        kind: "openai-compatible",
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        apiKeyRef: provider.apiKeyRef,
+        apiKeySecret: "",
+      };
+    case "anthropic":
+      return {
+        id: provider.id,
+        kind: "anthropic",
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        apiKeyRef: provider.apiKeyRef,
+        apiKeySecret: "",
+      };
+    default: {
+      const _exhaustive: never = provider;
+      return _exhaustive;
+    }
+  }
+}
+
+interface ProviderPreset {
+  readonly label: string;
+  readonly name: string;
+  readonly baseUrl: string;
+  readonly model: string;
+  readonly apiKeyRef: string;
+}
+
+const PROVIDER_PRESETS: readonly ProviderPreset[] = [
+  {
+    label: "OpenRouter",
+    name: "Cloud · OpenRouter (Claude Sonnet 4)",
+    baseUrl: "https://openrouter.ai/api/v1",
+    model: "anthropic/claude-sonnet-4",
+    apiKeyRef: "openrouter",
+  },
+  {
+    label: "DeepSeek",
+    name: "Cloud · DeepSeek (deepseek-chat)",
+    baseUrl: "https://api.deepseek.com/v1",
+    model: "deepseek-chat",
+    apiKeyRef: "deepseek",
+  },
+  {
+    label: "Gemini",
+    name: "Cloud · Gemini (gemini-2.5-flash)",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    model: "gemini-2.5-flash",
+    apiKeyRef: "gemini",
+  },
+];
+
+function newProviderDraft(): ProviderDraft {
+  return {
+    id: `prov-custom-${Date.now()}`,
+    kind: "openai-compatible",
+    name: "",
+    baseUrl: "https://api.openai.com/v1",
+    model: "",
+    apiKeyRef: `key:custom-${Date.now()}`,
+    apiKeySecret: "",
+  };
+}
+
+function actionToDraft(action: CustomAction): ActionDraft {
+  return {
+    id: action.id,
+    name: action.name,
+    systemPrompt: action.systemPrompt,
+    isBuiltIn: action.isBuiltIn,
+    renderMode: action.renderMode,
+    htmlTemplate: action.htmlTemplate ?? "",
+    cssTemplate: action.cssTemplate ?? "",
+  };
+}
+
+function newActionDraft(): ActionDraft {
+  return {
+    id: `act-custom-${Date.now()}`,
+    name: "",
+    systemPrompt: "Provide a concise grammatical explanation in Simplified Chinese.",
+    isBuiltIn: false,
+    renderMode: "custom-html",
+    htmlTemplate:
+      '<div class="custom-card"><h4>{{sourceText}}</h4><div>{{content}}</div></div>',
+    cssTemplate:
+      ".custom-card { padding: 14px; border-radius: 10px; line-height: 1.6; }\n.custom-card h4 { margin: 0 0 8px; font-size: 14px; }",
+  };
+}
+
+function formatTimestamp(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return "";
+  }
+  return new Date(ms).toLocaleString();
+}
+
+export function SettingsDrawer({
+  isOpen,
+  theme,
+  providers,
+  configuredKeyRefs,
+  actions,
+  history,
+  onClose,
+  onSaveProvider,
+  onSaveAction,
+  onSelectHistory,
+  onRefreshHistory,
+}: SettingsDrawerProps) {
+  const [tab, setTab] = useState<DrawerTab>("providers");
+  const [providerDraft, setProviderDraft] = useState<ProviderDraft>(() =>
+    providers[0] ? providerToDraft(providers[0]) : newProviderDraft(),
+  );
+  const [actionDraft, setActionDraft] = useState<ActionDraft>(() =>
+    actions[0] ? actionToDraft(actions[0]) : newActionDraft(),
+  );
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      setStatusMessage(null);
+      setErrorMessage(null);
+    }
+  }, [isOpen, tab]);
+
+  if (!isOpen) {
+    return null;
+  }
+
+  const hasSavedKey =
+    providerDraft.apiKeyRef.trim().length > 0 &&
+    configuredKeyRefs.includes(providerDraft.apiKeyRef.trim());
+
+  const handleProviderSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    setErrorMessage(null);
+    setStatusMessage(null);
+
+    const id = providerDraft.id.trim();
+    if (!isProviderId(id)) {
+      setErrorMessage("Provider ID is required.");
+      return;
+    }
+
+    const name = providerDraft.name.trim();
+    const baseUrl = providerDraft.baseUrl.trim();
+    const model = providerDraft.model.trim();
+    if (!name || !baseUrl || !model) {
+      setErrorMessage("Name, Base URL, and Model are required.");
+      return;
+    }
+
+    let config: ProviderConfig;
+    switch (providerDraft.kind) {
+      case "ollama":
+        config = { kind: "ollama", id, name, baseUrl, model };
+        break;
+      case "openai-compatible":
+        config = {
+          kind: "openai-compatible",
+          id,
+          name,
+          baseUrl,
+          apiKeyRef: providerDraft.apiKeyRef.trim(),
+          model,
+        };
+        break;
+      case "anthropic":
+        config = {
+          kind: "anthropic",
+          id,
+          name,
+          baseUrl,
+          apiKeyRef: providerDraft.apiKeyRef.trim(),
+          model,
+        };
+        break;
+      default: {
+        const _exhaustive: never = providerDraft.kind;
+        return _exhaustive;
+      }
+    }
+
+    setSaving(true);
+    try {
+      const secret = providerDraft.apiKeySecret.trim();
+      await onSaveProvider(config, secret.length > 0 ? secret : undefined);
+      setProviderDraft((prev) => ({ ...prev, apiKeySecret: "" }));
+      setStatusMessage(`Saved provider "${name}".`);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleActionSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    setErrorMessage(null);
+    setStatusMessage(null);
+
+    const id = actionDraft.id.trim();
+    if (!isActionId(id)) {
+      setErrorMessage("Action ID is required.");
+      return;
+    }
+
+    const name = actionDraft.name.trim();
+    if (!name) {
+      setErrorMessage("Action name is required.");
+      return;
+    }
+
+    const action: CustomAction = {
+      id,
+      name,
+      systemPrompt: actionDraft.systemPrompt,
+      isBuiltIn: actionDraft.isBuiltIn,
+      renderMode: actionDraft.renderMode,
+      htmlTemplate:
+        actionDraft.renderMode === "custom-html" && actionDraft.htmlTemplate.trim().length > 0
+          ? actionDraft.htmlTemplate
+          : null,
+      cssTemplate:
+        actionDraft.renderMode === "custom-html" && actionDraft.cssTemplate.trim().length > 0
+          ? actionDraft.cssTemplate
+          : null,
+    };
+
+    setSaving(true);
+    try {
+      await onSaveAction(action);
+      setStatusMessage(`Saved action "${name}".`);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      className="drawer-backdrop"
+      data-card-theme={theme}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Settings"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <aside className="drawer-panel">
+        <header className="drawer-header">
+          <h2>Settings &amp; History</h2>
+          <button type="button" className="app-btn" onClick={onClose}>
+            Close
+          </button>
+        </header>
+
+        <nav className="drawer-tabs" aria-label="Settings sections">
+          <button
+            type="button"
+            className={`app-btn${tab === "providers" ? " primary" : ""}`}
+            onClick={() => setTab("providers")}
+          >
+            Providers ({providers.length})
+          </button>
+          <button
+            type="button"
+            className={`app-btn${tab === "actions" ? " primary" : ""}`}
+            onClick={() => setTab("actions")}
+          >
+            Actions ({actions.length})
+          </button>
+          <button
+            type="button"
+            className={`app-btn${tab === "history" ? " primary" : ""}`}
+            onClick={() => {
+              setTab("history");
+              void onRefreshHistory();
+            }}
+          >
+            History ({history.length})
+          </button>
+        </nav>
+
+        <div className="drawer-body">
+          {tab === "providers" ? (
+            <>
+              <div className="drawer-list">
+                {providers.map((provider) => (
+                  <button
+                    key={provider.id}
+                    type="button"
+                    className={`drawer-item${providerDraft.id === provider.id ? " active" : ""}`}
+                    onClick={() => {
+                      setProviderDraft(providerToDraft(provider));
+                      setStatusMessage(null);
+                      setErrorMessage(null);
+                    }}
+                  >
+                    <span className="drawer-item-title">
+                      <span>{provider.name}</span>
+                      <span>{provider.kind}</span>
+                    </span>
+                    <span className="drawer-item-meta">
+                      {provider.model} · {provider.baseUrl}
+                    </span>
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className="app-btn"
+                  onClick={() => setProviderDraft(newProviderDraft())}
+                >
+                  + Add Provider
+                </button>
+              </div>
+
+              <form className="drawer-form" onSubmit={(e) => void handleProviderSubmit(e)}>
+                <div className="drawer-presets">
+                  <span className="drawer-presets-label">Quick Presets:</span>
+                  {PROVIDER_PRESETS.map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      className="app-btn"
+                      onClick={() => {
+                        setProviderDraft((prev) => ({
+                          ...prev,
+                          kind: "openai-compatible",
+                          name: preset.name,
+                          baseUrl: preset.baseUrl,
+                          model: preset.model,
+                          apiKeyRef: preset.apiKeyRef,
+                        }));
+                        setStatusMessage(null);
+                        setErrorMessage(null);
+                      }}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+
+                <label className="drawer-field">
+                  Provider Kind
+                  <select
+                    value={providerDraft.kind}
+                    onChange={(e) => {
+                      const nextKind = e.target.value;
+                      if (
+                        nextKind === "ollama" ||
+                        nextKind === "openai-compatible" ||
+                        nextKind === "anthropic"
+                      ) {
+                        setProviderDraft((prev) => ({ ...prev, kind: nextKind }));
+                      }
+                    }}
+                  >
+                    <option value="ollama">Ollama (Local)</option>
+                    <option value="openai-compatible">OpenAI-Compatible (Local / Cloud)</option>
+                    <option value="anthropic">Anthropic (Cloud)</option>
+                  </select>
+                </label>
+
+                <label className="drawer-field">
+                  Display Name
+                  <input
+                    type="text"
+                    value={providerDraft.name}
+                    onChange={(e) =>
+                      setProviderDraft((prev) => ({ ...prev, name: e.target.value }))
+                    }
+                    placeholder="e.g. Local Ollama or Cloud OpenAI"
+                  />
+                </label>
+
+                <label className="drawer-field">
+                  Base URL
+                  <input
+                    type="text"
+                    value={providerDraft.baseUrl}
+                    onChange={(e) =>
+                      setProviderDraft((prev) => ({ ...prev, baseUrl: e.target.value }))
+                    }
+                    placeholder="http://localhost:11434"
+                  />
+                </label>
+
+                <label className="drawer-field">
+                  Model
+                  <input
+                    type="text"
+                    value={providerDraft.model}
+                    onChange={(e) =>
+                      setProviderDraft((prev) => ({ ...prev, model: e.target.value }))
+                    }
+                    placeholder="qwen2.5:14b"
+                  />
+                </label>
+
+                {providerDraft.kind !== "ollama" ? (
+                  <>
+                    <label className="drawer-field">
+                      API Key Reference
+                      <input
+                        type="text"
+                        value={providerDraft.apiKeyRef}
+                        onChange={(e) =>
+                          setProviderDraft((prev) => ({ ...prev, apiKeyRef: e.target.value }))
+                        }
+                        placeholder="key:openai (leave empty for local LM Studio)"
+                      />
+                    </label>
+                    <label className="drawer-field">
+                      API Key {hasSavedKey ? "(Saved — enter new value to replace)" : "(Optional)"}
+                      <input
+                        type="password"
+                        value={providerDraft.apiKeySecret}
+                        onChange={(e) =>
+                          setProviderDraft((prev) => ({ ...prev, apiKeySecret: e.target.value }))
+                        }
+                        placeholder="sk-..."
+                      />
+                    </label>
+                  </>
+                ) : null}
+
+                {statusMessage ? <div className="drawer-status">{statusMessage}</div> : null}
+                {errorMessage ? <div className="drawer-error">{errorMessage}</div> : null}
+
+                <button type="submit" className="app-btn primary" disabled={saving}>
+                  {saving ? "Saving..." : "Save Provider"}
+                </button>
+              </form>
+            </>
+          ) : null}
+
+          {tab === "actions" ? (
+            <>
+              <div className="drawer-list">
+                {actions.map((action) => (
+                  <button
+                    key={action.id}
+                    type="button"
+                    className={`drawer-item${actionDraft.id === action.id ? " active" : ""}`}
+                    onClick={() => {
+                      setActionDraft(actionToDraft(action));
+                      setStatusMessage(null);
+                      setErrorMessage(null);
+                    }}
+                  >
+                    <span className="drawer-item-title">
+                      <span>{action.name}</span>
+                      <span>{action.renderMode}</span>
+                    </span>
+                    <span className="drawer-item-meta">{action.systemPrompt}</span>
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className="app-btn"
+                  onClick={() => setActionDraft(newActionDraft())}
+                >
+                  + Add Custom Action
+                </button>
+              </div>
+
+              <form className="drawer-form" onSubmit={(e) => void handleActionSubmit(e)}>
+                <label className="drawer-field">
+                  Action Name
+                  <input
+                    type="text"
+                    value={actionDraft.name}
+                    onChange={(e) =>
+                      setActionDraft((prev) => ({ ...prev, name: e.target.value }))
+                    }
+                    placeholder="e.g. Compact HTML Card"
+                  />
+                </label>
+
+                <label className="drawer-field">
+                  Render Mode
+                  <select
+                    value={actionDraft.renderMode}
+                    onChange={(e) => {
+                      const nextMode = e.target.value;
+                      if (nextMode === "unified-3layer" || nextMode === "custom-html") {
+                        setActionDraft((prev) => ({ ...prev, renderMode: nextMode }));
+                      }
+                    }}
+                  >
+                    <option value="unified-3layer">Unified 3-Layer Card</option>
+                    <option value="custom-html">Custom HTML Sandbox (DOMPurify + Shadow DOM)</option>
+                  </select>
+                </label>
+
+                <label className="drawer-field">
+                  System Prompt
+                  <textarea
+                    value={actionDraft.systemPrompt}
+                    onChange={(e) =>
+                      setActionDraft((prev) => ({ ...prev, systemPrompt: e.target.value }))
+                    }
+                  />
+                </label>
+
+                {actionDraft.renderMode === "custom-html" ? (
+                  <>
+                    <label className="drawer-field">
+                      HTML Template (supports {"{{sourceText}}"} and {"{{content}}"})
+                      <textarea
+                        value={actionDraft.htmlTemplate}
+                        onChange={(e) =>
+                          setActionDraft((prev) => ({ ...prev, htmlTemplate: e.target.value }))
+                        }
+                      />
+                    </label>
+                    <label className="drawer-field">
+                      CSS Template (scoped inside Shadow DOM)
+                      <textarea
+                        value={actionDraft.cssTemplate}
+                        onChange={(e) =>
+                          setActionDraft((prev) => ({ ...prev, cssTemplate: e.target.value }))
+                        }
+                      />
+                    </label>
+                  </>
+                ) : null}
+
+                {statusMessage ? <div className="drawer-status">{statusMessage}</div> : null}
+                {errorMessage ? <div className="drawer-error">{errorMessage}</div> : null}
+
+                <button type="submit" className="app-btn primary" disabled={saving}>
+                  {saving ? "Saving..." : "Save Action"}
+                </button>
+              </form>
+            </>
+          ) : null}
+
+          {tab === "history" ? (
+            <div className="drawer-list">
+              {history.length === 0 ? (
+                <div className="empty-state">No saved analyses yet.</div>
+              ) : (
+                history.map((entry) => (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    className="drawer-item"
+                    onClick={() => {
+                      onSelectHistory(entry);
+                      onClose();
+                    }}
+                  >
+                    <span className="drawer-item-title">
+                      <span>{entry.sourceText}</span>
+                    </span>
+                    <span className="drawer-item-meta">
+                      {entry.latencyMs}ms · {formatTimestamp(entry.createdAt)}
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+          ) : null}
+        </div>
+      </aside>
+    </div>
+  );
+}
