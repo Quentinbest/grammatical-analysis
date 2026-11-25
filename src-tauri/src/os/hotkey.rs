@@ -8,7 +8,9 @@ use crate::os::clipboard::{capture_selected_text, ClipboardError, ClipboardPort}
 use crate::os::floating_window::Point;
 
 pub const DEFAULT_HOTKEY: &str = "Alt+E";
+pub const SECONDARY_HOTKEY: &str = "CommandOrControl+Shift+E";
 pub const SELECTION_CAPTURED_EVENT: &str = "selection://captured";
+pub const SELECTION_ERROR_EVENT: &str = "selection://error";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Modifier {
@@ -206,6 +208,15 @@ pub fn register_global_hotkey<R: HotkeyRegistrar>(
     Ok(HotkeyRegistration { spec })
 }
 
+/// Event payload emitted on `selection://error` when global hotkey capture fails.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionErrorPayload {
+    pub code: String,
+    pub message: String,
+    pub hotkey: String,
+}
+
 /// Emits `selection://captured` to all Tauri webview listeners.
 pub fn emit_selection_captured<R: Runtime>(
     app: &AppHandle<R>,
@@ -213,6 +224,57 @@ pub fn emit_selection_captured<R: Runtime>(
 ) -> Result<(), HotkeyError> {
     app.emit(SELECTION_CAPTURED_EVENT, payload)
         .map_err(|e| HotkeyError::EmitFailed(e.to_string()))
+}
+
+pub fn emit_selection_error<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: &SelectionErrorPayload,
+) -> Result<(), HotkeyError> {
+    app.emit(SELECTION_ERROR_EVENT, payload)
+        .map_err(|e| HotkeyError::EmitFailed(e.to_string()))
+}
+
+pub fn build_selection_error_payload(err: &HotkeyError, hotkey: &str) -> SelectionErrorPayload {
+    let (code, message) = match err {
+        HotkeyError::CaptureFailed(ClipboardError::SimulateCopyFailed(detail)) => {
+            let lower = detail.to_ascii_lowercase();
+            if lower.contains("1002")
+                || lower.contains("not allowed to send keystrokes")
+                || lower.contains("assistive")
+                || lower.contains("accessibility")
+                || lower.contains("system events")
+            {
+                (
+                    "accessibility-denied",
+                    format!(
+                        "无法模拟复制选中文本（macOS 辅助功能权限未授权）。请在「系统设置 → 隐私与安全性 → 辅助功能」中允许本应用或终端，或直接使用 Cmd+Shift+E / 粘贴分析。({detail})"
+                    ),
+                )
+            } else {
+                (
+                    "simulate-copy-failed",
+                    format!(
+                        "无法自动复制选中文本（Simulate copy failed: {detail}）。可手动复制后点击「分析当前剪贴板」或直接粘贴输入。"
+                    ),
+                )
+            }
+        }
+        HotkeyError::CaptureFailed(ClipboardError::CaptureTimeout { .. })
+        | HotkeyError::CaptureFailed(ClipboardError::EmptySelection) => (
+            "empty-selection",
+            "未捕获到选中文本（No selected text captured）。请确认已选中英文句子并授予「系统设置 → 隐私与安全性 → 辅助功能」权限，或改用 Cmd+Shift+E / 点击「分析当前剪贴板」。".to_string(),
+        ),
+        other => (
+            "capture-failed",
+            format!("快捷键取词失败（Hotkey capture failed: {other}）。可点击「分析当前剪贴板」或直接粘贴句子。"),
+        ),
+    };
+
+    SelectionErrorPayload {
+        code: code.to_string(),
+        message,
+        hotkey: hotkey.to_string(),
+    }
 }
 
 /// Executes the hotkey capture flow: captures selected text with clipboard
@@ -355,5 +417,29 @@ mod tests {
             assert_eq!(spec.key, format!("F{n}"));
             assert_eq!(spec.to_string(), raw);
         }
+    }
+
+    #[test]
+    fn parses_secondary_hotkey_and_formats_capture_errors() {
+        let secondary = HotkeySpec::parse(SECONDARY_HOTKEY).expect("SECONDARY_HOTKEY must parse");
+        assert_eq!(secondary.modifiers, vec![Modifier::Shift, Modifier::Super]);
+        assert_eq!(secondary.key, "E");
+
+        let denied = build_selection_error_payload(
+            &HotkeyError::CaptureFailed(ClipboardError::SimulateCopyFailed(
+                "osascript is not allowed to send keystrokes (1002)".into(),
+            )),
+            "Alt+E",
+        );
+        assert_eq!(denied.code, "accessibility-denied");
+        assert!(denied.message.contains("辅助功能"));
+        assert_eq!(denied.hotkey, "Alt+E");
+
+        let empty = build_selection_error_payload(
+            &HotkeyError::CaptureFailed(ClipboardError::EmptySelection),
+            "Shift+Super+E",
+        );
+        assert_eq!(empty.code, "empty-selection");
+        assert!(empty.message.contains("Cmd+Shift+E"));
     }
 }
