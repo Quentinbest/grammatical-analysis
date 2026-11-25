@@ -23,6 +23,10 @@
   },
   "bundle": {
     "active": false,
-    "icon": ["icons/icon.png"]
+    "icon": ["icons/icon.png"],
+    "resources": {
+      "../prompts/**/*": "prompts/",
+      "../knowledge/book/**/*": "knowledge/book/"
+    }
   }
 }
