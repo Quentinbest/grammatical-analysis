@@ -89,7 +89,6 @@ export const COMPLEX_34_WORD_CARD = mustParseStructured(
         kind: "clause",
         id: "c1",
         badge: "让步减化子句",
-        connector: "Although",
         star: true,
         items: [
           { kind: "connector", id: "t1", text: "Although", badge: "让步连接词", note: "引出省略主语和 be 动词的让步分句。" },

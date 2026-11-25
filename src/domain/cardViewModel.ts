@@ -95,6 +95,30 @@ export function formatGapTitle(index: GapIndex): string {
   return `空位 □${index}`;
 }
 
+export function isTokenVisible(
+  card: StructuredGrammarCard,
+  id: TokenId,
+  folded: FoldedClauses,
+  showGapLayer: boolean,
+): boolean {
+  for (const part of card.parts) {
+    if (part.kind === "token" && part.id === id) {
+      return true;
+    }
+    if (part.kind === "clause") {
+      if (folded.has(part.id)) {
+        continue;
+      }
+      for (const item of part.items) {
+        if (item.id === id) {
+          return item.kind !== "gap" || showGapLayer;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 export function findTokenNote(
   card: StructuredGrammarCard,
   id: TokenId | null,

@@ -6,6 +6,7 @@ import {
   hasFoldableClauses,
   hasGapSlots,
   hasOmittedHints,
+  isTokenVisible,
   setAllClausesFolded,
   shouldDrawGapArc,
   toggleClauseFold,
@@ -86,5 +87,22 @@ describe("cardViewModel", () => {
       note: "引出省略主语和 be 动词的让步分句。",
     });
     expect(findTokenNote(COMPLEX_34_WORD_CARD, toTokenId("missing"))).toBeNull();
+  });
+
+  it("checks token visibility across folded clauses and gap layer toggle", () => {
+    const empty = createEmptyFoldState();
+    const foldC1 = toggleClauseFold(empty, toClauseId("c1"));
+
+    // Main token remains visible regardless of folds or gap toggle
+    expect(isTokenVisible(SINGLE_GAP_CARD, toTokenId("t1"), foldC1, false)).toBe(true);
+
+    // Sub-token hidden when its clause is folded
+    expect(isTokenVisible(SINGLE_GAP_CARD, toTokenId("t2"), empty, true)).toBe(true);
+    expect(isTokenVisible(SINGLE_GAP_CARD, toTokenId("t2"), foldC1, true)).toBe(false);
+
+    // Gap slot hidden when gap layer is off OR when its clause is folded
+    expect(isTokenVisible(SINGLE_GAP_CARD, toTokenId("g1"), empty, true)).toBe(true);
+    expect(isTokenVisible(SINGLE_GAP_CARD, toTokenId("g1"), empty, false)).toBe(false);
+    expect(isTokenVisible(SINGLE_GAP_CARD, toTokenId("g1"), foldC1, true)).toBe(false);
   });
 });

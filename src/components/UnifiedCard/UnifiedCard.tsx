@@ -7,6 +7,7 @@ import {
   hasFoldableClauses,
   hasGapSlots,
   hasOmittedHints,
+  isTokenVisible,
   setAllClausesFolded,
   shouldDrawGapArc,
   toggleClauseFold,
@@ -14,6 +15,7 @@ import {
 import type {
   CardTheme,
   ClauseGroup,
+  ClauseId,
   ClauseItem,
   FallbackGrammarCard,
   GapIndex,
@@ -180,6 +182,7 @@ function StructuredCardView({
   readonly compact: boolean;
   readonly onSpeak?: (sourceText: string) => void;
 }) {
+  const [prevCard, setPrevCard] = useState<StructuredGrammarCard>(card);
   const [foldedClauses, setFoldedClauses] = useState<FoldedClauses>(createEmptyFoldState);
   const [showGapLayer, setShowGapLayer] = useState(true);
   const [showOmitted, setShowOmitted] = useState(false);
@@ -187,14 +190,16 @@ function StructuredCardView({
   const [traceArcs, setTraceArcs] = useState<readonly TraceArc[]>([]);
   const [traceColors, setTraceColors] = useState<TraceColors>(DEFAULT_TRACE_COLORS);
 
+  if (prevCard !== card) {
+    setPrevCard(card);
+    setFoldedClauses(createEmptyFoldState());
+    setSelectedId(null);
+    setTraceArcs([]);
+  }
+
   const cardRef = useRef<HTMLElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const markerPrefix = useId().replace(/:/g, "");
-
-  useEffect(() => {
-    setFoldedClauses(createEmptyFoldState());
-    setSelectedId(null);
-  }, [card]);
 
   const clausesPresent = hasFoldableClauses(card);
   const gapsPresent = hasGapSlots(card);
@@ -286,6 +291,30 @@ function StructuredCardView({
     setSelectedId((prev) => (prev === id ? null : id));
   };
 
+  const handleToggleClause = (clauseId: ClauseId) => {
+    const nextFolded = toggleClauseFold(foldedClauses, clauseId);
+    setFoldedClauses(nextFolded);
+    if (selectedId !== null && !isTokenVisible(card, selectedId, nextFolded, showGapLayer)) {
+      setSelectedId(null);
+    }
+  };
+
+  const handleToggleFoldAll = () => {
+    const nextFolded = setAllClausesFolded(card, !foldedNow);
+    setFoldedClauses(nextFolded);
+    if (selectedId !== null && !isTokenVisible(card, selectedId, nextFolded, showGapLayer)) {
+      setSelectedId(null);
+    }
+  };
+
+  const handleToggleGapLayer = () => {
+    const nextShowGap = !showGapLayer;
+    setShowGapLayer(nextShowGap);
+    if (selectedId !== null && !isTokenVisible(card, selectedId, foldedClauses, nextShowGap)) {
+      setSelectedId(null);
+    }
+  };
+
   const renderWordToken = (token: MainToken | SubToken) => {
     const isMain = token.kind === "token";
     const isSelected = selectedId === token.id;
@@ -334,7 +363,8 @@ function StructuredCardView({
           </span>
         );
       }
-      case "connector":
+      case "connector": {
+        const isSelected = selectedId === item.id;
         return (
           <Fragment key={item.id}>
             <span className="clause-badge">
@@ -342,7 +372,7 @@ function StructuredCardView({
               {item.star ? <span className="star-sup">★</span> : null}
             </span>
             <span
-              className="conn-oval"
+              className={`conn-oval conn-interactive${isSelected ? " selected" : ""}`}
               data-tok-id={item.id}
               onClick={() => handleSelectToken(item.id)}
             >
@@ -352,6 +382,7 @@ function StructuredCardView({
             </span>
           </Fragment>
         );
+      }
       default: {
         const _exhaustive: never = item;
         return _exhaustive;
@@ -368,12 +399,15 @@ function StructuredCardView({
           className="fold-pill"
           data-fold-clause={clause.id}
           title="点击原位展开"
-          onClick={() => setFoldedClauses((prev) => toggleClauseFold(prev, clause.id))}
+          onClick={() => handleToggleClause(clause.id)}
         >
           [… {clause.badge}]
         </button>
       );
     }
+
+    const hasLeadingInlineConnector = clause.items[0]?.kind === "connector";
+    const showClauseConnector = Boolean(clause.connector) && !hasLeadingInlineConnector;
 
     return (
       <span key={clause.id} className="clause-box" data-clause-id={clause.id}>
@@ -382,12 +416,12 @@ function StructuredCardView({
           className="clause-badge"
           data-fold-clause={clause.id}
           title="点击折叠此从句"
-          onClick={() => setFoldedClauses((prev) => toggleClauseFold(prev, clause.id))}
+          onClick={() => handleToggleClause(clause.id)}
         >
           {clause.badge}
           {clause.star ? <span className="star-sup">★</span> : null}
         </button>
-        {clause.connector ? (
+        {showClauseConnector ? (
           <>
             <span className="conn-oval">
               {clause.connector}
@@ -487,19 +521,22 @@ function StructuredCardView({
 
         <div className="sent-body">
           {card.parts.map((part, idx) => {
+            const leadingSpace = idx > 0 && part.kind !== "punct" ? " " : null;
             switch (part.kind) {
               case "punct":
-                return <Fragment key={`punct-${idx}`}>{part.text} </Fragment>;
+                return <Fragment key={`punct-${idx}`}>{part.text}</Fragment>;
               case "token":
                 return (
                   <Fragment key={part.id}>
-                    {renderWordToken(part)}{" "}
+                    {leadingSpace}
+                    {renderWordToken(part)}
                   </Fragment>
                 );
               case "clause":
                 return (
                   <Fragment key={part.id}>
-                    {renderClause(part)}{" "}
+                    {leadingSpace}
+                    {renderClause(part)}
                   </Fragment>
                 );
               default: {
@@ -518,7 +555,7 @@ function StructuredCardView({
               type="button"
               className={`ctrl-btn${foldedNow ? " active" : ""}`}
               data-action="fold-all"
-              onClick={() => setFoldedClauses(setAllClausesFolded(card, !foldedNow))}
+              onClick={handleToggleFoldAll}
             >
               {foldedNow ? "展开全部从句" : "折叠修饰看主干"}
             </button>
@@ -528,7 +565,7 @@ function StructuredCardView({
               type="button"
               className={`ctrl-btn${showGapLayer ? " active" : ""}`}
               data-action="toggle-gap"
-              onClick={() => setShowGapLayer((prev) => !prev)}
+              onClick={handleToggleGapLayer}
             >
               空位回指
             </button>

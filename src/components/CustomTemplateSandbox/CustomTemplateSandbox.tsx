@@ -9,7 +9,7 @@ export interface CustomTemplateSandboxProps {
   readonly className?: string;
 }
 
-const BASE_SHADOW_CSS = `:host { display: block; color: inherit; font-family: inherit; }`;
+const BASE_SHADOW_CSS = `:host { display: block; contain: layout style; position: relative; color: inherit; font-family: inherit; }`;
 
 export function CustomTemplateSandbox({
   html,
