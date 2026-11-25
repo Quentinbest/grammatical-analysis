@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::domain::types::AnalysisStreamEvent;
 
 use super::provider::{
-    join_endpoint, send_and_stream, AnalysisPromptRequest, LlmProvider, ProviderError,
+    has_path_suffix, send_and_stream, split_url_tail, AnalysisPromptRequest, LlmProvider,
+    ProviderError,
 };
 use super::sse::SseParser;
 
@@ -82,14 +83,15 @@ struct AnthropicErrorBody {
     message: Option<String>,
 }
 
-fn anthropic_messages_url(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with("/v1/messages") {
-        trimmed.to_string()
-    } else if trimmed.ends_with("/v1") {
-        format!("{trimmed}/messages")
+pub(crate) fn anthropic_messages_url(base_url: &str) -> String {
+    let (base_part, tail) = split_url_tail(base_url.trim());
+    let trimmed = base_part.trim_end_matches('/');
+    if has_path_suffix(trimmed, "v1/messages") {
+        format!("{trimmed}{tail}")
+    } else if has_path_suffix(trimmed, "v1") {
+        format!("{trimmed}/messages{tail}")
     } else {
-        join_endpoint(trimmed, "v1/messages")
+        format!("{trimmed}/v1/messages{tail}")
     }
 }
 
@@ -136,7 +138,7 @@ impl LlmProvider for AnthropicProvider {
                                 accumulated: &mut String,
                                 done: &mut bool,
                                 parse_error: &mut Option<ProviderError>| {
-                if *done || parse_error.is_some() {
+                if *done || parse_error.is_some() || request.cancel.is_cancelled() {
                     return;
                 }
                 let trimmed = data.trim();
@@ -154,7 +156,10 @@ impl LlmProvider for AnthropicProvider {
                     }
                 };
 
-                let kind = event_name.unwrap_or(payload.event_type.as_str());
+                let kind = match event_name {
+                    Some(name) if !name.is_empty() && name != "message" => name,
+                    _ => payload.event_type.as_str(),
+                };
                 match kind {
                     "content_block_delta" => {
                         if let Some(delta) = payload.delta {

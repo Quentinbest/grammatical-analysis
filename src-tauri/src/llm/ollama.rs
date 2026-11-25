@@ -113,7 +113,7 @@ impl LlmProvider for OllamaProvider {
                                accumulated: &mut String,
                                done: &mut bool,
                                parse_error: &mut Option<ProviderError>| {
-                if *done || parse_error.is_some() {
+                if *done || parse_error.is_some() || request.cancel.is_cancelled() {
                     return;
                 }
                 match serde_json::from_str::<OllamaChatChunk>(line) {

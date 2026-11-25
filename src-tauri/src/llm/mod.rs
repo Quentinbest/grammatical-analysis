@@ -497,4 +497,436 @@ mod tests {
             Some(AnalysisStreamEvent::Failed { code, .. }) if code == "timeout"
         ));
     }
+
+    fn provider_config_for(kind: &str, base_url: String) -> ProviderConfig {
+        match kind {
+            "ollama" => ProviderConfig::Ollama {
+                id: "o".into(),
+                name: "Ollama".into(),
+                base_url,
+                model: "m".into(),
+            },
+            "openai" => ProviderConfig::OpenaiCompatible {
+                id: "oa".into(),
+                name: "OpenAI".into(),
+                base_url,
+                api_key_ref: "k".into(),
+                model: "m".into(),
+            },
+            _ => ProviderConfig::Anthropic {
+                id: "a".into(),
+                name: "Anthropic".into(),
+                base_url,
+                api_key_ref: "k".into(),
+                model: "m".into(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_stream_without_terminal_marker_fails_with_protocol_across_all_providers() {
+        for kind in ["ollama", "openai", "anthropic"] {
+            let (base_url, _handle) = spawn_mock_server(move |mut stream, _| async move {
+                let (content_type, chunk) = match kind {
+                    "ollama" => (
+                        "application/x-ndjson",
+                        "{\"message\":{\"content\":\"partial\"},\"done\":false}\n",
+                    ),
+                    "openai" => (
+                        "text/event-stream",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+                    ),
+                    _ => (
+                        "text/event-stream",
+                        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n",
+                    ),
+                };
+                write_chunked_http(&mut stream, content_type, &[chunk], None).await;
+            })
+            .await;
+
+            let config = provider_config_for(kind, base_url);
+            let provider = create_provider(&config, Some("key".into())).unwrap();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let events_cb = Arc::clone(&events);
+
+            let err = provider
+                .stream_analysis(AnalysisPromptRequest::new("sys", "usr"), move |ev| {
+                    events_cb.lock().unwrap().push(ev);
+                })
+                .await
+                .expect_err("truncated stream must return Protocol error");
+
+            assert!(
+                matches!(err, ProviderError::Protocol { .. }),
+                "provider={kind}, err={err:?}"
+            );
+            let captured = events.lock().unwrap();
+            assert!(
+                !captured
+                    .iter()
+                    .any(|ev| matches!(ev, AnalysisStreamEvent::Completed { .. })),
+                "provider={kind} must not emit Completed on truncated stream: {captured:?}"
+            );
+            assert!(
+                matches!(
+                    captured.last(),
+                    Some(AnalysisStreamEvent::Failed { code, .. }) if code == "protocol"
+                ),
+                "provider={kind}, events={captured:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_and_non_sse_http_200_responses_fail_with_protocol() {
+        for kind in ["ollama", "openai", "anthropic"] {
+            for (label, body) in [
+                ("empty", ""),
+                ("plain_json", "{\"status\":\"ok\",\"message\":\"not a stream\"}"),
+            ] {
+                let body_owned = body.to_string();
+                let (base_url, _handle) = spawn_mock_server(move |mut stream, _| async move {
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body_owned.len(),
+                        body_owned
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    let _ = stream.flush().await;
+                })
+                .await;
+
+                let config = provider_config_for(kind, base_url);
+                let provider = create_provider(&config, Some("key".into())).unwrap();
+                let events = Arc::new(Mutex::new(Vec::new()));
+                let events_cb = Arc::clone(&events);
+
+                let err = provider
+                    .stream_analysis(AnalysisPromptRequest::new("sys", "usr"), move |ev| {
+                        events_cb.lock().unwrap().push(ev);
+                    })
+                    .await
+                    .expect_err("empty/non-SSE 200 OK must return Protocol error");
+
+                assert!(
+                    matches!(err, ProviderError::Protocol { .. }),
+                    "provider={kind}, case={label}, err={err:?}"
+                );
+                let captured = events.lock().unwrap();
+                assert!(
+                    !captured
+                        .iter()
+                        .any(|ev| matches!(ev, AnalysisStreamEvent::Completed { .. })),
+                    "provider={kind}, case={label} must not emit Completed: {captured:?}"
+                );
+                assert!(
+                    matches!(
+                        captured.last(),
+                        Some(AnalysisStreamEvent::Failed { code, .. }) if code == "protocol"
+                    ),
+                    "provider={kind}, case={label}, events={captured:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_final_chunk_or_eof_flush_emits_cancelled_not_completed() {
+        for kind in ["ollama", "openai", "anthropic"] {
+            for case in ["single_final_chunk", "eof_flush_without_trailing_newline"] {
+                let (base_url, _handle) = spawn_mock_server(move |mut stream, _| async move {
+                    let (content_type, payload) = match (kind, case) {
+                        ("ollama", "single_final_chunk") => (
+                            "application/x-ndjson",
+                            "{\"message\":{\"content\":\"part1\"},\"done\":true}\n",
+                        ),
+                        ("ollama", _) => (
+                            "application/x-ndjson",
+                            "{\"message\":{\"content\":\"part1\"},\"done\":true}",
+                        ),
+                        ("openai", "single_final_chunk") => (
+                            "text/event-stream",
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"part1\"}}]}\n\ndata: [DONE]\n\n",
+                        ),
+                        ("openai", _) => (
+                            "text/event-stream",
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"part1\"}}]}",
+                        ),
+                        (_, "single_final_chunk") => (
+                            "text/event-stream",
+                            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"part1\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                        ),
+                        (_, _) => (
+                            "text/event-stream",
+                            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"part1\"}}",
+                        ),
+                    };
+                    write_chunked_http(&mut stream, content_type, &[payload], None).await;
+                })
+                .await;
+
+                let config = provider_config_for(kind, base_url);
+                let provider = create_provider(&config, Some("key".into())).unwrap();
+                let cancel = CancellationToken::new();
+                let cancel_on_delta = cancel.clone();
+                let events = Arc::new(Mutex::new(Vec::new()));
+                let events_cb = Arc::clone(&events);
+
+                let mut req = AnalysisPromptRequest::new("sys", "usr");
+                req.cancel = cancel;
+
+                let err = provider
+                    .stream_analysis(req, move |ev| {
+                        if matches!(ev, AnalysisStreamEvent::TokenDelta { .. }) {
+                            cancel_on_delta.cancel();
+                        }
+                        events_cb.lock().unwrap().push(ev);
+                    })
+                    .await
+                    .expect_err("cancelled stream must return Cancelled");
+
+                assert_eq!(err, ProviderError::Cancelled, "provider={kind}, case={case}");
+                let captured = events.lock().unwrap();
+                assert!(
+                    !captured
+                        .iter()
+                        .any(|ev| matches!(ev, AnalysisStreamEvent::Completed { .. })),
+                    "provider={kind}, case={case} must not emit Completed: {captured:?}"
+                );
+                assert!(
+                    matches!(
+                        captured.last(),
+                        Some(AnalysisStreamEvent::Failed { code, .. }) if code == "cancelled"
+                    ),
+                    "provider={kind}, case={case}, events={captured:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn join_endpoint_and_anthropic_url_preserve_query_and_check_segment_boundaries() {
+        use super::anthropic::anthropic_messages_url;
+        use super::provider::join_endpoint;
+
+        assert_eq!(
+            join_endpoint(
+                "https://my-resource.openai.azure.com/openai/deployments/gpt4?api-version=2024-02-01",
+                "chat/completions"
+            ),
+            "https://my-resource.openai.azure.com/openai/deployments/gpt4/chat/completions?api-version=2024-02-01"
+        );
+        assert_eq!(
+            join_endpoint(
+                "https://my-resource.openai.azure.com/openai/deployments/gpt4/chat/completions/?api-version=2024-02-01#frag",
+                "chat/completions"
+            ),
+            "https://my-resource.openai.azure.com/openai/deployments/gpt4/chat/completions?api-version=2024-02-01#frag"
+        );
+        assert_eq!(
+            join_endpoint("http://localhost:11434/my-api/chat", "api/chat"),
+            "http://localhost:11434/my-api/chat/api/chat"
+        );
+        assert_eq!(
+            join_endpoint("http://localhost:11434/proxy/api/chat/", "api/chat"),
+            "http://localhost:11434/proxy/api/chat"
+        );
+        assert_eq!(
+            join_endpoint("http://localhost:11434/api/chat", "api/chat"),
+            "http://localhost:11434/api/chat"
+        );
+
+        assert_eq!(
+            anthropic_messages_url("https://api.anthropic.com/v1?beta=1"),
+            "https://api.anthropic.com/v1/messages?beta=1"
+        );
+        assert_eq!(
+            anthropic_messages_url("https://api.anthropic.com/v1/messages/?beta=1#top"),
+            "https://api.anthropic.com/v1/messages?beta=1#top"
+        );
+        assert_eq!(
+            anthropic_messages_url("https://api.anthropic.com/my-v1?beta=1"),
+            "https://api.anthropic.com/my-v1/v1/messages?beta=1"
+        );
+        assert_eq!(
+            anthropic_messages_url("https://api.anthropic.com/proxy/v1"),
+            "https://api.anthropic.com/proxy/v1/messages"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_compat_handles_null_choices_and_null_delta() {
+        let (base_url, _handle) = spawn_mock_server(|mut stream, _| async move {
+            let chunks = [
+                "data: {\"choices\":null}\n\n",
+                "data: {\"choices\":[{\"delta\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":null}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                "data: [DONE]\n\n",
+            ];
+            write_chunked_http(&mut stream, "text/event-stream", &chunks, None).await;
+        })
+        .await;
+
+        let config = provider_config_for("openai", format!("{base_url}/v1"));
+        let provider = create_provider(&config, Some("sk-test".into())).unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_cb = Arc::clone(&events);
+
+        provider
+            .stream_analysis(AnalysisPromptRequest::new("sys", "usr"), move |ev| {
+                events_cb.lock().unwrap().push(ev);
+            })
+            .await
+            .expect("null choices/delta should succeed cleanly");
+
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(
+            captured[0],
+            AnalysisStreamEvent::TokenDelta { chunk: "ok".into() }
+        );
+        assert!(matches!(
+            &captured[1],
+            AnalysisStreamEvent::Completed { raw_json, .. } if raw_json == "ok"
+        ));
+    }
+
+    #[tokio::test]
+    async fn openai_compat_maps_sse_error_frames_and_inline_rate_limit_or_auth_errors() {
+        let cases: [(&str, &str, &str); 5] = [
+            (
+                "sse_event_error_rate_limit",
+                "event: error\ndata: {\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}}\n\n",
+                "rate-limited",
+            ),
+            (
+                "sse_event_error_auth",
+                "event: error\ndata: {\"type\":\"authentication_error\",\"code\":401,\"message\":\"bad key\"}\n\n",
+                "unauthorized",
+            ),
+            (
+                "sse_event_error_plain",
+                "event: error\ndata: {\"choices\":[]}\n\n",
+                "protocol",
+            ),
+            (
+                "inline_rate_limit_429",
+                "data: {\"error\":{\"code\":429,\"message\":\"too many requests\"}}\n\n",
+                "rate-limited",
+            ),
+            (
+                "inline_auth_401",
+                "data: {\"error\":{\"status\":401,\"message\":\"invalid api key\"}}\n\n",
+                "unauthorized",
+            ),
+        ];
+
+        for (label, frame, expected_code) in cases {
+            let frame_owned = frame.to_string();
+            let (base_url, _handle) = spawn_mock_server(move |mut stream, _| async move {
+                write_chunked_http(&mut stream, "text/event-stream", &[&frame_owned], None).await;
+            })
+            .await;
+
+            let config = provider_config_for("openai", format!("{base_url}/v1"));
+            let provider = create_provider(&config, Some("sk-test".into())).unwrap();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let events_cb = Arc::clone(&events);
+
+            let err = provider
+                .stream_analysis(AnalysisPromptRequest::new("sys", "usr"), move |ev| {
+                    events_cb.lock().unwrap().push(ev);
+                })
+                .await
+                .expect_err("error frame must fail");
+
+            assert_eq!(err.code(), expected_code, "case={label}, err={err:?}");
+            let captured = events.lock().unwrap();
+            assert!(
+                matches!(
+                    captured.last(),
+                    Some(AnalysisStreamEvent::Failed { code, .. }) if code == expected_code
+                ),
+                "case={label}, events={captured:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_dispatches_event_message_empty_and_omitted_via_payload_type() {
+        let (base_url, _handle) = spawn_mock_server(|mut stream, _| async move {
+            let chunks = [
+                "event: message\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"A\"}}\n\n",
+                "event:\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"B\"}}\n\n",
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"C\"}}\n\n",
+                "event: message\ndata: {\"type\":\"message_stop\"}\n\n",
+            ];
+            write_chunked_http(&mut stream, "text/event-stream", &chunks, None).await;
+        })
+        .await;
+
+        let config = provider_config_for("anthropic", base_url);
+        let provider = create_provider(&config, Some("sk-ant".into())).unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_cb = Arc::clone(&events);
+
+        provider
+            .stream_analysis(AnalysisPromptRequest::new("sys", "usr"), move |ev| {
+                events_cb.lock().unwrap().push(ev);
+            })
+            .await
+            .expect("anthropic stream with event: message must succeed");
+
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 4);
+        assert!(matches!(
+            &captured[3],
+            AnalysisStreamEvent::Completed { raw_json, .. } if raw_json == "ABC"
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_provider_trims_api_key_whitespace_and_newlines() {
+        for kind in ["openai", "anthropic"] {
+            let (base_url, req_handle) = spawn_mock_server(move |mut stream, _| async move {
+                let chunks = if kind == "openai" {
+                    vec![
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                        "data: [DONE]\n\n",
+                    ]
+                } else {
+                    vec![
+                        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+                        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                    ]
+                };
+                write_chunked_http(&mut stream, "text/event-stream", &chunks, None).await;
+            })
+            .await;
+
+            let config = provider_config_for(kind, base_url);
+            let provider =
+                create_provider(&config, Some("  sk-trimmed-key\r\n".into())).unwrap();
+
+            provider
+                .stream_analysis(AnalysisPromptRequest::new("sys", "usr"), |_| {})
+                .await
+                .expect("trimmed api_key must not fail header builder");
+
+            let raw_req = req_handle.await.expect("server join").to_ascii_lowercase();
+            if kind == "openai" {
+                assert!(
+                    raw_req.contains("authorization: bearer sk-trimmed-key\r\n"),
+                    "expected trimmed bearer header, got:\n{raw_req}"
+                );
+            } else {
+                assert!(
+                    raw_req.contains("x-api-key: sk-trimmed-key\r\n"),
+                    "expected trimmed x-api-key header, got:\n{raw_req}"
+                );
+            }
+        }
+    }
 }

@@ -156,7 +156,14 @@ pub fn create_provider(
     api_key: Option<String>,
 ) -> Result<ProviderClient, ProviderError> {
     let client = build_http_client()?;
-    let normalized_key = api_key.filter(|k| !k.trim().is_empty());
+    let normalized_key = api_key.and_then(|k| {
+        let trimmed = k.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
 
     match config {
         ProviderConfig::Ollama {
@@ -194,13 +201,43 @@ pub(crate) fn build_http_client() -> Result<reqwest::Client, ProviderError> {
         })
 }
 
-pub(crate) fn join_endpoint(base_url: &str, suffix: &str) -> String {
-    let base = base_url.trim_end_matches('/');
-    let clean_suffix = suffix.trim_start_matches('/');
-    if base.ends_with(clean_suffix) {
-        base.to_string()
+pub(crate) fn split_url_tail(url: &str) -> (&str, &str) {
+    match url.find(['?', '#']) {
+        Some(idx) => (&url[..idx], &url[idx..]),
+        None => (url, ""),
+    }
+}
+
+fn url_path(base_without_query: &str) -> &str {
+    if let Some(scheme_pos) = base_without_query.find("://") {
+        let after_scheme = &base_without_query[scheme_pos + 3..];
+        match after_scheme.find('/') {
+            Some(path_start) => &after_scheme[path_start..],
+            None => "",
+        }
     } else {
-        format!("{base}/{clean_suffix}")
+        base_without_query
+    }
+}
+
+pub(crate) fn has_path_suffix(base_without_query: &str, suffix: &str) -> bool {
+    let path = url_path(base_without_query).trim_end_matches('/');
+    let clean_suffix = suffix.trim_matches('/');
+    if clean_suffix.is_empty() {
+        return true;
+    }
+    let with_slash = format!("/{clean_suffix}");
+    path == clean_suffix || path == with_slash || path.ends_with(&with_slash)
+}
+
+pub(crate) fn join_endpoint(base_url: &str, suffix: &str) -> String {
+    let (base_part, tail) = split_url_tail(base_url.trim());
+    let base = base_part.trim_end_matches('/');
+    let clean_suffix = suffix.trim_matches('/');
+    if has_path_suffix(base, clean_suffix) {
+        format!("{base}{tail}")
+    } else {
+        format!("{base}/{clean_suffix}{tail}")
     }
 }
 
@@ -313,6 +350,7 @@ where
     }
 
     let mut byte_stream = response.bytes_stream();
+    let mut saw_terminal = false;
     loop {
         if cancel.is_cancelled() {
             return emit_and_return_err(ProviderError::Cancelled, on_event);
@@ -334,11 +372,24 @@ where
         };
 
         match next_item {
-            Some(Ok(bytes)) => match on_chunk(Some(&bytes)) {
-                Ok(true) => break,
-                Ok(false) => {}
-                Err(err) => return emit_and_return_err(err, on_event),
-            },
+            Some(Ok(bytes)) => {
+                let finished = match on_chunk(Some(&bytes)) {
+                    Ok(finished) => finished,
+                    Err(err) => {
+                        if cancel.is_cancelled() {
+                            return emit_and_return_err(ProviderError::Cancelled, on_event);
+                        }
+                        return emit_and_return_err(err, on_event);
+                    }
+                };
+                if cancel.is_cancelled() {
+                    return emit_and_return_err(ProviderError::Cancelled, on_event);
+                }
+                if finished {
+                    saw_terminal = true;
+                    break;
+                }
+            }
             Some(Err(err)) => {
                 let provider_err = if err.is_timeout() {
                     ProviderError::Timeout { timeout_ms }
@@ -353,8 +404,33 @@ where
         }
     }
 
-    if let Err(err) = on_chunk(None) {
-        return emit_and_return_err(err, on_event);
+    if !saw_terminal {
+        let finished = match on_chunk(None) {
+            Ok(finished) => finished,
+            Err(err) => {
+                if cancel.is_cancelled() {
+                    return emit_and_return_err(ProviderError::Cancelled, on_event);
+                }
+                return emit_and_return_err(err, on_event);
+            }
+        };
+        if cancel.is_cancelled() {
+            return emit_and_return_err(ProviderError::Cancelled, on_event);
+        }
+        saw_terminal = finished;
+    }
+
+    if cancel.is_cancelled() {
+        return emit_and_return_err(ProviderError::Cancelled, on_event);
+    }
+
+    if !saw_terminal {
+        return emit_and_return_err(
+            ProviderError::Protocol {
+                message: "stream ended before protocol completion marker".to_string(),
+            },
+            on_event,
+        );
     }
 
     Ok(())
