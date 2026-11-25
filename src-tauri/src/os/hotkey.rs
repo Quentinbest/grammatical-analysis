@@ -150,9 +150,11 @@ fn normalize_key(token: &str) -> Result<String, HotkeyError> {
     }
 
     if let Some(rest) = upper.strip_prefix('F') {
-        if let Ok(num) = rest.parse::<u8>() {
-            if (1..=24).contains(&num) {
-                return Ok(upper);
+        if !rest.starts_with('0') {
+            if let Ok(num) = rest.parse::<u8>() {
+                if (1..=24).contains(&num) {
+                    return Ok(upper);
+                }
             }
         }
     }
@@ -328,5 +330,30 @@ mod tests {
         let reg = register_global_hotkey(&registrar, "Option+E").expect("registration succeeds");
         assert_eq!(reg.spec().to_string(), "Alt+E");
         assert_eq!(registrar.registered.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rejects_leading_zero_function_keys_and_accepts_f1_to_f24() {
+        assert_eq!(
+            HotkeySpec::parse("Alt+F01"),
+            Err(HotkeyError::InvalidKey("F01".to_string()))
+        );
+        assert_eq!(
+            HotkeySpec::parse("Alt+F00"),
+            Err(HotkeyError::InvalidKey("F00".to_string()))
+        );
+        assert_eq!(
+            HotkeySpec::parse("Alt+f09"),
+            Err(HotkeyError::InvalidKey("f09".to_string()))
+        );
+
+        for n in 1..=24 {
+            let raw = format!("Alt+F{n}");
+            let spec = HotkeySpec::parse(&raw)
+                .unwrap_or_else(|e| panic!("expected {raw} to parse, got {e}"));
+            assert_eq!(spec.modifiers, vec![Modifier::Alt]);
+            assert_eq!(spec.key, format!("F{n}"));
+            assert_eq!(spec.to_string(), raw);
+        }
     }
 }

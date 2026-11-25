@@ -8,6 +8,8 @@ pub const DEFAULT_POLL_INTERVAL_MS: u64 = 10;
 
 const CAPTURE_SENTINEL: &str = "__grammatical_analysis_clipboard_sentinel_v1__";
 
+static CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardError {
     ReadFailed(String),
@@ -89,6 +91,9 @@ pub fn capture_selected_text_with_interval<P: ClipboardPort + ?Sized>(
     poll_timeout_ms: u64,
     poll_interval_ms: u64,
 ) -> Result<String, ClipboardError> {
+    let _capture_lock = CAPTURE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _guard = ClipboardGuard::snapshot(port)?;
 
     // Place a sentinel so we can detect a fresh copy even if the selected text
@@ -421,5 +426,51 @@ mod tests {
 
         assert_eq!(err, ClipboardError::EmptySelection);
         assert_eq!(clipboard.current_text().as_deref(), Some("KEEP_ME"));
+    }
+
+    #[test]
+    fn serializes_concurrent_captures_without_leaking_sentinel() {
+        use std::sync::Barrier;
+
+        for _ in 0..5 {
+            let clipboard = FakeClipboard::new(
+                Some("USER_ORIGINAL_TEXT".to_string()),
+                FakeCopyBehavior::WriteAfterReads {
+                    text: "Selected clause".to_string(),
+                    delay_reads: 4,
+                },
+            );
+            let barrier = Barrier::new(2);
+
+            let (first, second) = thread::scope(|s| {
+                let h1 = s.spawn(|| {
+                    barrier.wait();
+                    capture_selected_text_with_interval(&clipboard, 200, 2)
+                });
+                let h2 = s.spawn(|| {
+                    barrier.wait();
+                    capture_selected_text_with_interval(&clipboard, 200, 2)
+                });
+                (
+                    h1.join().expect("first capture thread should not panic"),
+                    h2.join().expect("second capture thread should not panic"),
+                )
+            });
+
+            assert_eq!(
+                first.expect("first capture should succeed"),
+                "Selected clause"
+            );
+            assert_eq!(
+                second.expect("second capture should succeed"),
+                "Selected clause"
+            );
+            assert_eq!(clipboard.copy_count(), 2);
+            assert_ne!(clipboard.current_text().as_deref(), Some(CAPTURE_SENTINEL));
+            assert_eq!(
+                clipboard.current_text().as_deref(),
+                Some("USER_ORIGINAL_TEXT")
+            );
+        }
     }
 }
