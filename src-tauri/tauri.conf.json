@@ -18,15 +18,24 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {
-    "active": false,
-    "icon": ["icons/icon.png"],
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ],
     "resources": {
       "../prompts/**/*": "prompts/",
       "../knowledge/book/**/*": "knowledge/book/"
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
     }
   }
 }

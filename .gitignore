@@ -1,5 +1,6 @@
 .DS_Store
 .agents/
+artifacts/
 todo.md
 node_modules/
 dist/
