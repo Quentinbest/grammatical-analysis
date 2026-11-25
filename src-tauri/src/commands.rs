@@ -25,11 +25,19 @@ pub struct RunAnalysisInput {
     pub action_id: String,
 }
 
+#[derive(Debug, Clone)]
+enum InFlightEntry {
+    Active(CancellationToken),
+    PreCancelled,
+}
+
+const MAX_PRE_CANCELLED_ENTRIES: usize = 64;
+
 pub struct AppState {
     pub storage: Arc<Storage>,
     retriever: OnceLock<Option<Bm25BookRetriever>>,
     prompt_builder: OnceLock<Option<PromptBuilder>>,
-    in_flight: Mutex<HashMap<String, CancellationToken>>,
+    in_flight: Mutex<HashMap<String, InFlightEntry>>,
 }
 
 impl AppState {
@@ -64,17 +72,40 @@ impl AppState {
 
     fn register_in_flight(&self, request_id: &str, token: CancellationToken) {
         if let Ok(mut map) = self.in_flight.lock() {
-            if let Some(prev) = map.insert(request_id.to_string(), token) {
-                prev.cancel();
+            match map.insert(request_id.to_string(), InFlightEntry::Active(token.clone())) {
+                Some(InFlightEntry::PreCancelled) => {
+                    token.cancel();
+                }
+                Some(InFlightEntry::Active(prev)) => {
+                    prev.cancel();
+                }
+                None => {}
             }
         }
     }
 
     fn cancel_in_flight(&self, request_id: &str) -> bool {
         if let Ok(mut map) = self.in_flight.lock() {
-            if let Some(token) = map.remove(request_id) {
-                token.cancel();
-                return true;
+            match map.remove(request_id) {
+                Some(InFlightEntry::Active(token)) => {
+                    token.cancel();
+                    return true;
+                }
+                Some(InFlightEntry::PreCancelled) => {
+                    map.insert(request_id.to_string(), InFlightEntry::PreCancelled);
+                    return true;
+                }
+                None => {
+                    let pre_cancelled_count = map
+                        .values()
+                        .filter(|v| matches!(v, InFlightEntry::PreCancelled))
+                        .count();
+                    if pre_cancelled_count >= MAX_PRE_CANCELLED_ENTRIES {
+                        map.retain(|_, v| !matches!(v, InFlightEntry::PreCancelled));
+                    }
+                    map.insert(request_id.to_string(), InFlightEntry::PreCancelled);
+                    return true;
+                }
             }
         }
         false
@@ -123,34 +154,39 @@ fn resolve_resource_dir(relative: &str) -> Option<PathBuf> {
 }
 
 fn resolve_api_key(storage: &Storage, provider: &ProviderConfig) -> Result<Option<String>, String> {
-    let (key_ref, default_env) = match provider {
+    let key_ref = match provider {
         ProviderConfig::Ollama { .. } => return Ok(None),
-        ProviderConfig::OpenaiCompatible { api_key_ref, .. } => {
-            (api_key_ref.as_str(), "OPENAI_API_KEY")
-        }
-        ProviderConfig::Anthropic { api_key_ref, .. } => {
-            (api_key_ref.as_str(), "ANTHROPIC_API_KEY")
-        }
+        ProviderConfig::OpenaiCompatible { api_key_ref, .. }
+        | ProviderConfig::Anthropic { api_key_ref, .. } => api_key_ref.as_str(),
     };
 
-    if key_ref.trim().is_empty() || key_ref.eq_ignore_ascii_case("none") {
+    let trimmed = key_ref.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
         return Ok(None);
     }
 
-    if let Some(stored) = storage.get_api_key(key_ref).map_err(|e| e.to_string())? {
+    if let Some(stored) = storage.get_api_key(trimmed).map_err(|e| e.to_string())? {
         return Ok(Some(stored));
     }
 
-    let env_fallback = match key_ref.trim().to_ascii_lowercase().as_str() {
-        "openrouter" | "key:openrouter" => "OPENROUTER_API_KEY",
-        "deepseek" | "key:deepseek" => "DEEPSEEK_API_KEY",
-        "gemini" | "key:gemini" => "GEMINI_API_KEY",
-        _ => default_env,
+    let env_fallback = match (provider, trimmed.to_ascii_lowercase().as_str()) {
+        (ProviderConfig::OpenaiCompatible { .. }, "openai" | "key:openai") => {
+            Some("OPENAI_API_KEY")
+        }
+        (ProviderConfig::Anthropic { .. }, "anthropic" | "key:anthropic") => {
+            Some("ANTHROPIC_API_KEY")
+        }
+        (_, "openrouter" | "key:openrouter") => Some("OPENROUTER_API_KEY"),
+        (_, "deepseek" | "key:deepseek") => Some("DEEPSEEK_API_KEY"),
+        (_, "gemini" | "key:gemini") => Some("GEMINI_API_KEY"),
+        _ => None,
     };
 
-    Ok(std::env::var(env_fallback)
-        .ok()
-        .filter(|v| !v.trim().is_empty()))
+    Ok(env_fallback.and_then(|var| {
+        std::env::var(var)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+    }))
 }
 
 fn build_prompt_request(
@@ -214,6 +250,21 @@ pub async fn run_analysis(
         return Err(msg);
     }
 
+    let cancel = CancellationToken::new();
+    state.register_in_flight(&request.request_id, cancel.clone());
+    let _guard = InFlightGuard {
+        state: &state,
+        request_id: request.request_id.clone(),
+    };
+
+    if cancel.is_cancelled() {
+        let _ = channel.send(AnalysisStreamEvent::Failed {
+            code: "cancelled".into(),
+            message: "analysis request cancelled".into(),
+        });
+        return Ok(());
+    }
+
     let provider = state
         .storage
         .get_provider(&request.provider_id)
@@ -228,14 +279,14 @@ pub async fn run_analysis(
 
     let api_key = resolve_api_key(&state.storage, &provider)?;
     let hits = state.retrieve_context(source_text, 4);
+    if cancel.is_cancelled() {
+        let _ = channel.send(AnalysisStreamEvent::Failed {
+            code: "cancelled".into(),
+            message: "analysis request cancelled".into(),
+        });
+        return Ok(());
+    }
     let _ = channel.send(AnalysisStreamEvent::RetrievalReady { hits: hits.clone() });
-
-    let cancel = CancellationToken::new();
-    state.register_in_flight(&request.request_id, cancel.clone());
-    let _guard = InFlightGuard {
-        state: &state,
-        request_id: request.request_id.clone(),
-    };
 
     let prompt_req = build_prompt_request(&state, &action, source_text, &hits, cancel);
     let client = create_provider(&provider, api_key).map_err(|err| {
@@ -326,4 +377,50 @@ pub fn list_history(
 #[tauri::command]
 pub fn read_clipboard_text() -> Result<Option<String>, String> {
     SystemClipboard.read_text().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_api_key_does_not_leak_openai_env_to_custom_provider() {
+        let storage = Storage::open_in_memory().expect("in-memory db");
+        let custom_provider = ProviderConfig::OpenaiCompatible {
+            id: "prov-custom-thirdparty".into(),
+            name: "Third Party".into(),
+            base_url: "https://thirdparty.example/v1".into(),
+            api_key_ref: "key:custom-thirdparty".into(),
+            model: "custom-model".into(),
+        };
+
+        std::env::set_var("OPENAI_API_KEY", "sk-openai-personal-secret");
+        let resolved = resolve_api_key(&storage, &custom_provider).expect("resolve");
+        assert_eq!(resolved, None);
+
+        let openai_provider = ProviderConfig::OpenaiCompatible {
+            id: "prov-openai".into(),
+            name: "Cloud OpenAI".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key_ref: "key:openai".into(),
+            model: "gpt-4.1-mini".into(),
+        };
+        let resolved_openai = resolve_api_key(&storage, &openai_provider).expect("resolve openai");
+        assert_eq!(
+            resolved_openai.as_deref(),
+            Some("sk-openai-personal-secret")
+        );
+    }
+
+    #[test]
+    fn cancel_in_flight_before_register_cancels_subsequent_token() {
+        let storage = Arc::new(Storage::open_in_memory().expect("in-memory db"));
+        let state = AppState::new(storage);
+
+        assert!(state.cancel_in_flight("req-early-cancel"));
+        let token = CancellationToken::new();
+        state.register_in_flight("req-early-cancel", token.clone());
+        assert!(token.is_cancelled());
+        state.remove_in_flight("req-early-cancel");
+    }
 }

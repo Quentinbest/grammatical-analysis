@@ -151,6 +151,18 @@ fn normalize_key(token: &str) -> Result<String, HotkeyError> {
         return Ok(upper);
     }
 
+    if let Some(rest) = upper.strip_prefix("KEY") {
+        if rest.len() == 1 && rest.chars().all(|c| c.is_ascii_alphabetic()) {
+            return Ok(rest.to_string());
+        }
+    }
+
+    if let Some(rest) = upper.strip_prefix("DIGIT") {
+        if rest.len() == 1 && rest.chars().all(|c| c.is_ascii_digit()) {
+            return Ok(rest.to_string());
+        }
+    }
+
     if let Some(rest) = upper.strip_prefix('F') {
         if !rest.starts_with('0') {
             if let Ok(num) = rest.parse::<u8>() {
@@ -424,6 +436,18 @@ mod tests {
         let secondary = HotkeySpec::parse(SECONDARY_HOTKEY).expect("SECONDARY_HOTKEY must parse");
         assert_eq!(secondary.modifiers, vec![Modifier::Shift, Modifier::Super]);
         assert_eq!(secondary.key, "E");
+
+        let from_plugin_secondary = HotkeySpec::parse("shift+super+KeyE")
+            .expect("keyboard_types KeyE format must parse");
+        assert_eq!(from_plugin_secondary.to_string(), "Shift+Super+E");
+
+        let from_plugin_primary =
+            HotkeySpec::parse("alt+KeyE").expect("keyboard_types alt+KeyE format must parse");
+        assert_eq!(from_plugin_primary.to_string(), "Alt+E");
+
+        let from_plugin_digit =
+            HotkeySpec::parse("ctrl+Digit1").expect("keyboard_types Digit1 format must parse");
+        assert_eq!(from_plugin_digit.to_string(), "Ctrl+1");
 
         let denied = build_selection_error_payload(
             &HotkeyError::CaptureFailed(ClipboardError::SimulateCopyFailed(

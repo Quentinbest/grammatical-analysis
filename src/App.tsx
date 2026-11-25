@@ -128,6 +128,15 @@ function buildFallbackActions(): readonly CustomAction[] {
   ];
 }
 
+function escapeHtml(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function renderCustomHtmlTemplate(
   action: CustomAction,
   sourceText: string,
@@ -137,10 +146,15 @@ function renderCustomHtmlTemplate(
   const template =
     action.htmlTemplate ??
     '<section class="custom-output"><h4>{{sourceText}}</h4><div>{{content}}</div></section>';
-  return template
-    .replaceAll("{{sourceText}}", sourceText)
-    .replaceAll("{{meaning}}", meaning)
-    .replaceAll("{{content}}", rawOutput);
+  const values: Record<string, string> = {
+    "{{sourceText}}": escapeHtml(sourceText),
+    "{{meaning}}": escapeHtml(meaning),
+    "{{content}}": rawOutput,
+  };
+  return template.replace(
+    /\{\{(sourceText|meaning|content)\}\}/g,
+    (match) => values[match] ?? match,
+  );
 }
 
 export function App() {
@@ -392,6 +406,7 @@ export function App() {
       sourceText: entry.sourceText,
       rawJson: entry.rawJson,
       latencyMs: entry.latencyMs,
+      actionId: entry.actionId,
     });
   };
 
@@ -575,24 +590,30 @@ export function App() {
           </div>
         ) : null}
 
-        {state.kind === "ready" || state.kind === "fallback" ? (
-          activeAction?.renderMode === "custom-html" ? (
-            <section className="stage-panel">
-              <CustomTemplateSandbox
-                html={renderCustomHtmlTemplate(
-                  activeAction,
-                  state.sourceText,
-                  state.rawJson,
-                  state.card.meaning,
-                )}
-                css={activeAction.cssTemplate}
-                theme={theme}
-              />
-            </section>
-          ) : (
-            <UnifiedCard card={state.card} theme={theme} onSpeak={handleSpeak} />
-          )
-        ) : null}
+        {state.kind === "ready" || state.kind === "fallback"
+          ? (() => {
+              const resultAction =
+                (state.actionId
+                  ? actions.find((a) => a.id === state.actionId)
+                  : null) ?? activeAction;
+              return resultAction?.renderMode === "custom-html" ? (
+                <section className="stage-panel">
+                  <CustomTemplateSandbox
+                    html={renderCustomHtmlTemplate(
+                      resultAction,
+                      state.sourceText,
+                      state.rawJson,
+                      state.card.meaning,
+                    )}
+                    css={resultAction.cssTemplate}
+                    theme={theme}
+                  />
+                </section>
+              ) : (
+                <UnifiedCard card={state.card} theme={theme} onSpeak={handleSpeak} />
+              );
+            })()
+          : null}
       </main>
 
       <SettingsDrawer

@@ -30,6 +30,7 @@ export type AnalysisStreamState =
   | {
       readonly kind: "streaming";
       readonly requestId: string;
+      readonly actionId?: ActionId;
       readonly sourceText: string;
       readonly hits: readonly RetrievalHit[];
       readonly streamedText: string;
@@ -37,6 +38,7 @@ export type AnalysisStreamState =
   | {
       readonly kind: "ready";
       readonly requestId: string;
+      readonly actionId?: ActionId;
       readonly sourceText: string;
       readonly hits: readonly RetrievalHit[];
       readonly rawJson: string;
@@ -46,6 +48,7 @@ export type AnalysisStreamState =
   | {
       readonly kind: "fallback";
       readonly requestId: string;
+      readonly actionId?: ActionId;
       readonly sourceText: string;
       readonly hits: readonly RetrievalHit[];
       readonly rawJson: string;
@@ -83,6 +86,7 @@ export interface LoadSnapshotArgs {
   readonly sourceText: string;
   readonly rawJson: string;
   readonly latencyMs: number;
+  readonly actionId?: ActionId;
 }
 
 export interface UseAnalysisStreamResult {
@@ -145,6 +149,7 @@ export function useAnalysisStream(
       setState({
         kind: "streaming",
         requestId,
+        actionId,
         sourceText: trimmed,
         hits: [],
         streamedText: "",
@@ -181,6 +186,7 @@ export function useAnalysisStream(
               setState({
                 kind: "ready",
                 requestId,
+                actionId,
                 sourceText: trimmed,
                 hits: latestHits,
                 rawJson: event.rawJson,
@@ -191,6 +197,7 @@ export function useAnalysisStream(
               setState({
                 kind: "fallback",
                 requestId,
+                actionId,
                 sourceText: trimmed,
                 hits: latestHits,
                 rawJson: event.rawJson,
@@ -275,32 +282,37 @@ export function useAnalysisStream(
     setState({ kind: "idle" });
   }, []);
 
-  const loadSnapshot = useCallback(({ sourceText, rawJson, latencyMs }: LoadSnapshotArgs) => {
-    activeRequestIdRef.current = null;
-    const parsed = parseGrammarCard(rawJson, sourceText);
-    const snapshotId = "history-snapshot";
-    if (parsed.kind === "structured") {
-      setState({
-        kind: "ready",
-        requestId: snapshotId,
-        sourceText,
-        hits: [],
-        rawJson,
-        card: parsed,
-        latencyMs,
-      });
-    } else {
-      setState({
-        kind: "fallback",
-        requestId: snapshotId,
-        sourceText,
-        hits: [],
-        rawJson,
-        card: parsed,
-        latencyMs,
-      });
-    }
-  }, []);
+  const loadSnapshot = useCallback(
+    ({ sourceText, rawJson, latencyMs, actionId }: LoadSnapshotArgs) => {
+      activeRequestIdRef.current = null;
+      const parsed = parseGrammarCard(rawJson, sourceText);
+      const snapshotId = "history-snapshot";
+      if (parsed.kind === "structured") {
+        setState({
+          kind: "ready",
+          requestId: snapshotId,
+          actionId,
+          sourceText,
+          hits: [],
+          rawJson,
+          card: parsed,
+          latencyMs,
+        });
+      } else {
+        setState({
+          kind: "fallback",
+          requestId: snapshotId,
+          actionId,
+          sourceText,
+          hits: [],
+          rawJson,
+          card: parsed,
+          latencyMs,
+        });
+      }
+    },
+    [],
+  );
 
   return { state, start, cancel, reset, loadSnapshot };
 }

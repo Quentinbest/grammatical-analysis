@@ -371,7 +371,7 @@ impl Storage {
         }
         let created_at = unix_timestamp_millis();
         let seq = CARD_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let id = format!("card-{created_at}-{seq}");
+        let id = format!("card-{created_at}-{seq:06}");
 
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
         conn.execute(
@@ -395,7 +395,7 @@ impl Storage {
         let mut stmt = conn.prepare(
             "SELECT id, source_text, provider_id, action_id, raw_json, latency_ms, created_at
              FROM history
-             ORDER BY created_at DESC, id DESC
+             ORDER BY created_at DESC, rowid DESC
              LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt.query_map(params![i64::from(limit), i64::from(offset)], |row| {
@@ -860,5 +860,28 @@ mod tests {
             p95_ms <= 15.0,
             "1000-row history query p95 {p95_ms:.3}ms exceeded 15.0ms threshold"
         );
+    }
+
+    #[test]
+    fn list_history_preserves_newest_first_order_within_same_millisecond() {
+        let storage = Storage::open_in_memory().expect("in-memory db");
+        let mut saved_ids = Vec::new();
+        for i in 1..=15 {
+            let id = storage
+                .save_history(&HistoryEntryInput {
+                    source_text: format!("Sentence {i}."),
+                    provider_id: "prov-ollama".into(),
+                    action_id: "act-english-structure".into(),
+                    raw_json: "{}".into(),
+                    latency_ms: i,
+                })
+                .expect("save history");
+            saved_ids.push(id);
+        }
+
+        let listed = storage.list_history(20, 0).expect("list history");
+        let listed_ids: Vec<String> = listed.into_iter().map(|e| e.id).collect();
+        let expected_ids: Vec<String> = saved_ids.into_iter().rev().collect();
+        assert_eq!(listed_ids, expected_ids);
     }
 }

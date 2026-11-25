@@ -99,6 +99,7 @@ function providerToDraft(provider: ProviderConfig): ProviderDraft {
 }
 
 interface ProviderPreset {
+  readonly id: string;
   readonly label: string;
   readonly name: string;
   readonly baseUrl: string;
@@ -108,6 +109,7 @@ interface ProviderPreset {
 
 const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   {
+    id: "provider-openrouter",
     label: "OpenRouter",
     name: "Cloud · OpenRouter (Claude Sonnet 4)",
     baseUrl: "https://openrouter.ai/api/v1",
@@ -115,6 +117,7 @@ const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     apiKeyRef: "openrouter",
   },
   {
+    id: "provider-deepseek",
     label: "DeepSeek",
     name: "Cloud · DeepSeek (deepseek-chat)",
     baseUrl: "https://api.deepseek.com/v1",
@@ -122,6 +125,7 @@ const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     apiKeyRef: "deepseek",
   },
   {
+    id: "provider-gemini",
     label: "Gemini",
     name: "Cloud · Gemini (gemini-2.5-flash)",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -195,14 +199,39 @@ export function SettingsDrawer({
   const [actionDraft, setActionDraft] = useState<ActionDraft>(() =>
     actions[0] ? actionToDraft(actions[0]) : newActionDraft(),
   );
+  const [providerDirty, setProviderDirty] = useState(false);
+  const [actionDirty, setActionDirty] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    if (providerDirty) {
+      return;
+    }
+    setProviderDraft((prev) => {
+      const matched = providers.find((p) => p.id === prev.id) ?? providers[0];
+      return matched ? providerToDraft(matched) : prev;
+    });
+  }, [providers, providerDirty]);
+
+  useEffect(() => {
+    if (actionDirty) {
+      return;
+    }
+    setActionDraft((prev) => {
+      const matched = actions.find((a) => a.id === prev.id) ?? actions[0];
+      return matched ? actionToDraft(matched) : prev;
+    });
+  }, [actions, actionDirty]);
+
+  useEffect(() => {
     if (isOpen) {
       setStatusMessage(null);
       setErrorMessage(null);
+    } else {
+      setProviderDirty(false);
+      setActionDirty(false);
     }
   }, [isOpen, tab]);
 
@@ -233,6 +262,12 @@ export function SettingsDrawer({
       return;
     }
 
+    const secret = providerDraft.apiKeySecret.trim();
+    const effectiveApiKeyRef =
+      providerDraft.kind === "ollama"
+        ? ""
+        : providerDraft.apiKeyRef.trim() || (secret.length > 0 ? `key:${id}` : "");
+
     let config: ProviderConfig;
     switch (providerDraft.kind) {
       case "ollama":
@@ -244,7 +279,7 @@ export function SettingsDrawer({
           id,
           name,
           baseUrl,
-          apiKeyRef: providerDraft.apiKeyRef.trim(),
+          apiKeyRef: effectiveApiKeyRef,
           model,
         };
         break;
@@ -254,7 +289,7 @@ export function SettingsDrawer({
           id,
           name,
           baseUrl,
-          apiKeyRef: providerDraft.apiKeyRef.trim(),
+          apiKeyRef: effectiveApiKeyRef,
           model,
         };
         break;
@@ -266,9 +301,13 @@ export function SettingsDrawer({
 
     setSaving(true);
     try {
-      const secret = providerDraft.apiKeySecret.trim();
       await onSaveProvider(config, secret.length > 0 ? secret : undefined);
-      setProviderDraft((prev) => ({ ...prev, apiKeySecret: "" }));
+      setProviderDraft((prev) => ({
+        ...prev,
+        apiKeyRef: effectiveApiKeyRef,
+        apiKeySecret: "",
+      }));
+      setProviderDirty(false);
       setStatusMessage(`Saved provider "${name}".`);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -313,6 +352,7 @@ export function SettingsDrawer({
     setSaving(true);
     try {
       await onSaveAction(action);
+      setActionDirty(false);
       setStatusMessage(`Saved action "${name}".`);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -380,6 +420,7 @@ export function SettingsDrawer({
                     className={`drawer-item${providerDraft.id === provider.id ? " active" : ""}`}
                     onClick={() => {
                       setProviderDraft(providerToDraft(provider));
+                      setProviderDirty(false);
                       setStatusMessage(null);
                       setErrorMessage(null);
                     }}
@@ -396,7 +437,10 @@ export function SettingsDrawer({
                 <button
                   type="button"
                   className="app-btn"
-                  onClick={() => setProviderDraft(newProviderDraft())}
+                  onClick={() => {
+                    setProviderDraft(newProviderDraft());
+                    setProviderDirty(true);
+                  }}
                 >
                   + Add Provider
                 </button>
@@ -411,14 +455,21 @@ export function SettingsDrawer({
                       type="button"
                       className="app-btn"
                       onClick={() => {
-                        setProviderDraft((prev) => ({
-                          ...prev,
-                          kind: "openai-compatible",
-                          name: preset.name,
-                          baseUrl: preset.baseUrl,
-                          model: preset.model,
-                          apiKeyRef: preset.apiKeyRef,
-                        }));
+                        const existing = providers.find((p) => p.id === preset.id);
+                        setProviderDraft(
+                          existing
+                            ? providerToDraft(existing)
+                            : {
+                                id: preset.id,
+                                kind: "openai-compatible",
+                                name: preset.name,
+                                baseUrl: preset.baseUrl,
+                                model: preset.model,
+                                apiKeyRef: preset.apiKeyRef,
+                                apiKeySecret: "",
+                              },
+                        );
+                        setProviderDirty(true);
                         setStatusMessage(null);
                         setErrorMessage(null);
                       }}
@@ -439,6 +490,7 @@ export function SettingsDrawer({
                         nextKind === "openai-compatible" ||
                         nextKind === "anthropic"
                       ) {
+                        setProviderDirty(true);
                         setProviderDraft((prev) => ({ ...prev, kind: nextKind }));
                       }
                     }}
@@ -454,9 +506,10 @@ export function SettingsDrawer({
                   <input
                     type="text"
                     value={providerDraft.name}
-                    onChange={(e) =>
-                      setProviderDraft((prev) => ({ ...prev, name: e.target.value }))
-                    }
+                    onChange={(e) => {
+                      setProviderDirty(true);
+                      setProviderDraft((prev) => ({ ...prev, name: e.target.value }));
+                    }}
                     placeholder="e.g. Local Ollama or Cloud OpenAI"
                   />
                 </label>
@@ -466,9 +519,10 @@ export function SettingsDrawer({
                   <input
                     type="text"
                     value={providerDraft.baseUrl}
-                    onChange={(e) =>
-                      setProviderDraft((prev) => ({ ...prev, baseUrl: e.target.value }))
-                    }
+                    onChange={(e) => {
+                      setProviderDirty(true);
+                      setProviderDraft((prev) => ({ ...prev, baseUrl: e.target.value }));
+                    }}
                     placeholder="http://localhost:11434"
                   />
                 </label>
@@ -478,9 +532,10 @@ export function SettingsDrawer({
                   <input
                     type="text"
                     value={providerDraft.model}
-                    onChange={(e) =>
-                      setProviderDraft((prev) => ({ ...prev, model: e.target.value }))
-                    }
+                    onChange={(e) => {
+                      setProviderDirty(true);
+                      setProviderDraft((prev) => ({ ...prev, model: e.target.value }));
+                    }}
                     placeholder="qwen2.5:14b"
                   />
                 </label>
@@ -492,9 +547,10 @@ export function SettingsDrawer({
                       <input
                         type="text"
                         value={providerDraft.apiKeyRef}
-                        onChange={(e) =>
-                          setProviderDraft((prev) => ({ ...prev, apiKeyRef: e.target.value }))
-                        }
+                        onChange={(e) => {
+                          setProviderDirty(true);
+                          setProviderDraft((prev) => ({ ...prev, apiKeyRef: e.target.value }));
+                        }}
                         placeholder="key:openai (leave empty for local LM Studio)"
                       />
                     </label>
@@ -503,9 +559,10 @@ export function SettingsDrawer({
                       <input
                         type="password"
                         value={providerDraft.apiKeySecret}
-                        onChange={(e) =>
-                          setProviderDraft((prev) => ({ ...prev, apiKeySecret: e.target.value }))
-                        }
+                        onChange={(e) => {
+                          setProviderDirty(true);
+                          setProviderDraft((prev) => ({ ...prev, apiKeySecret: e.target.value }));
+                        }}
                         placeholder="sk-..."
                       />
                     </label>
@@ -532,6 +589,7 @@ export function SettingsDrawer({
                     className={`drawer-item${actionDraft.id === action.id ? " active" : ""}`}
                     onClick={() => {
                       setActionDraft(actionToDraft(action));
+                      setActionDirty(false);
                       setStatusMessage(null);
                       setErrorMessage(null);
                     }}
@@ -546,7 +604,10 @@ export function SettingsDrawer({
                 <button
                   type="button"
                   className="app-btn"
-                  onClick={() => setActionDraft(newActionDraft())}
+                  onClick={() => {
+                    setActionDraft(newActionDraft());
+                    setActionDirty(true);
+                  }}
                 >
                   + Add Custom Action
                 </button>
@@ -558,9 +619,10 @@ export function SettingsDrawer({
                   <input
                     type="text"
                     value={actionDraft.name}
-                    onChange={(e) =>
-                      setActionDraft((prev) => ({ ...prev, name: e.target.value }))
-                    }
+                    onChange={(e) => {
+                      setActionDirty(true);
+                      setActionDraft((prev) => ({ ...prev, name: e.target.value }));
+                    }}
                     placeholder="e.g. Compact HTML Card"
                   />
                 </label>
@@ -572,6 +634,7 @@ export function SettingsDrawer({
                     onChange={(e) => {
                       const nextMode = e.target.value;
                       if (nextMode === "unified-3layer" || nextMode === "custom-html") {
+                        setActionDirty(true);
                         setActionDraft((prev) => ({ ...prev, renderMode: nextMode }));
                       }
                     }}
@@ -585,9 +648,10 @@ export function SettingsDrawer({
                   System Prompt
                   <textarea
                     value={actionDraft.systemPrompt}
-                    onChange={(e) =>
-                      setActionDraft((prev) => ({ ...prev, systemPrompt: e.target.value }))
-                    }
+                    onChange={(e) => {
+                      setActionDirty(true);
+                      setActionDraft((prev) => ({ ...prev, systemPrompt: e.target.value }));
+                    }}
                   />
                 </label>
 
@@ -597,18 +661,20 @@ export function SettingsDrawer({
                       HTML Template (supports {"{{sourceText}}"} and {"{{content}}"})
                       <textarea
                         value={actionDraft.htmlTemplate}
-                        onChange={(e) =>
-                          setActionDraft((prev) => ({ ...prev, htmlTemplate: e.target.value }))
-                        }
+                        onChange={(e) => {
+                          setActionDirty(true);
+                          setActionDraft((prev) => ({ ...prev, htmlTemplate: e.target.value }));
+                        }}
                       />
                     </label>
                     <label className="drawer-field">
                       CSS Template (scoped inside Shadow DOM)
                       <textarea
                         value={actionDraft.cssTemplate}
-                        onChange={(e) =>
-                          setActionDraft((prev) => ({ ...prev, cssTemplate: e.target.value }))
-                        }
+                        onChange={(e) => {
+                          setActionDirty(true);
+                          setActionDraft((prev) => ({ ...prev, cssTemplate: e.target.value }));
+                        }}
                       />
                     </label>
                   </>
