@@ -1,4 +1,5 @@
 pub mod domain;
+pub mod llm;
 pub mod retrieval;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
