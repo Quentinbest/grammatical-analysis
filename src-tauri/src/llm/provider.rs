@@ -68,7 +68,7 @@ impl AnalysisPromptRequest {
             system_prompt: system_prompt.into(),
             user_prompt: user_prompt.into(),
             temperature: Some(0.2),
-            max_tokens: Some(2048),
+            max_tokens: None,
             timeout: Duration::from_secs(60),
             cancel: CancellationToken::new(),
         }
