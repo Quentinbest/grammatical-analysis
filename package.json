@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "check": "node scripts/check-repo.mjs && pnpm build && pnpm test",
     "bench:parse": "node src/domain/__tests__/parseCard.bench.ts",
     "tauri": "tauri"
   },
