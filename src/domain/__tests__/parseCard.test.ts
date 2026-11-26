@@ -299,6 +299,62 @@ describe("parseGrammarCard", () => {
     }
   });
 
+  it("treats null optional fields on tokens, clauses, connectors, and bookRef as omitted", () => {
+    const raw = {
+      meaning: "截止日期总是来得太快。",
+      parts: [
+        {
+          kind: "token",
+          id: "t1",
+          text: "Deadlines",
+          role: "subj",
+          subLabel: null,
+          star: null,
+          antecedentIndex: null,
+          note: "主语。",
+        },
+        {
+          kind: "clause",
+          id: "c1",
+          badge: "分句",
+          connector: null,
+          omittedHint: null,
+          star: null,
+          items: [
+            {
+              kind: "connector",
+              id: "cn1",
+              text: "that",
+              badge: "连接词",
+              subLabel: null,
+              star: null,
+              note: "连接词。",
+            },
+            {
+              kind: "sub-token",
+              id: "st1",
+              text: "come",
+              role: "pred",
+              subLabel: null,
+              star: null,
+              antecedentIndex: null,
+              note: "谓语。",
+            },
+          ],
+        },
+      ],
+      recombination: "主干结构。",
+      caveatNote: null,
+      bookRef: { chapter: "ch01", section: "基本句型", passageId: null },
+    };
+
+    const card = parseGrammarCard(raw, "Deadlines come.");
+    expect(card.kind).toBe("structured");
+    if (card.kind === "structured") {
+      expect(card.bookRef).toEqual({ chapter: "ch01", section: "基本句型" });
+    }
+  });
+
   it("degrades malformed JSON to FallbackGrammarCard without throwing", () => {
     const card = parseGrammarCard("{not valid json", "The book fell.");
     expect(card.kind).toBe("fallback");

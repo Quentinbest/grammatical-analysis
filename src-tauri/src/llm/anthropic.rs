@@ -12,7 +12,7 @@ use super::provider::{
 use super::sse::SseParser;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const DEFAULT_MAX_TOKENS: u32 = 2048;
+const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 /// Anthropic Messages API streaming provider.
 #[derive(Debug, Clone)]
