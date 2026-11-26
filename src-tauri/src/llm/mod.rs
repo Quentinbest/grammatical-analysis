@@ -929,4 +929,72 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn default_request_omits_token_cap_for_openai_and_ollama_and_uses_8192_for_anthropic() {
+        for kind in ["openai", "ollama", "anthropic"] {
+            let (base_url, req_handle) = spawn_mock_server(move |mut stream, _| async move {
+                let (content_type, chunks) = match kind {
+                    "ollama" => (
+                        "application/x-ndjson",
+                        vec!["{\"message\":{\"content\":\"ok\"},\"done\":true}\n"],
+                    ),
+                    "openai" => (
+                        "text/event-stream",
+                        vec![
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                            "data: [DONE]\n\n",
+                        ],
+                    ),
+                    _ => (
+                        "text/event-stream",
+                        vec![
+                            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+                            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                        ],
+                    ),
+                };
+                write_chunked_http(&mut stream, content_type, &chunks, None).await;
+            })
+            .await;
+
+            let config = provider_config_for(kind, base_url);
+            let provider = create_provider(&config, Some("sk-test".into())).unwrap();
+
+            provider
+                .stream_analysis(AnalysisPromptRequest::new("sys", "usr"), |_| {})
+                .await
+                .expect("default request stream succeeds");
+
+            let raw_req = req_handle.await.expect("server join");
+            let (_, body_str) = raw_req
+                .split_once("\r\n\r\n")
+                .expect("HTTP request must have header/body separator");
+            let body: serde_json::Value =
+                serde_json::from_str(body_str).expect("request body must be valid JSON");
+
+            match kind {
+                "openai" => {
+                    assert!(
+                        body.get("max_tokens").is_none(),
+                        "openai default request must omit max_tokens, got: {body}"
+                    );
+                }
+                "ollama" => {
+                    let num_predict = body.get("options").and_then(|o| o.get("num_predict"));
+                    assert!(
+                        num_predict.is_none(),
+                        "ollama default request must omit num_predict, got: {body}"
+                    );
+                }
+                _ => {
+                    assert_eq!(
+                        body.get("max_tokens").and_then(|v| v.as_u64()),
+                        Some(8192),
+                        "anthropic default request must set max_tokens to 8192, got: {body}"
+                    );
+                }
+            }
+        }
+    }
 }
