@@ -1,6 +1,6 @@
 [package]
 name = "grammatical-analysis"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local-first English grammar analysis desktop app"
 authors = ["quentin"]
 edition = "2021"
