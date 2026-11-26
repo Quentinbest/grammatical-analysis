@@ -64,7 +64,7 @@ function makeFallback(sourceText: string, rawText: string, parseError: string, m
 }
 
 function parseOptionalString(value: unknown, field: string): ParseResult<string | undefined> {
-  if (value === undefined) {
+  if (value === undefined || value === null) {
     return ok(undefined);
   }
   if (typeof value !== "string") {
@@ -74,7 +74,7 @@ function parseOptionalString(value: unknown, field: string): ParseResult<string 
 }
 
 function parseOptionalBoolean(value: unknown, field: string): ParseResult<boolean | undefined> {
-  if (value === undefined) {
+  if (value === undefined || value === null) {
     return ok(undefined);
   }
   if (typeof value !== "boolean") {
@@ -84,7 +84,7 @@ function parseOptionalBoolean(value: unknown, field: string): ParseResult<boolea
 }
 
 function parseOptionalGapIndex(value: unknown, field: string): ParseResult<GapIndex | undefined> {
-  if (value === undefined) {
+  if (value === undefined || value === null) {
     return ok(undefined);
   }
   if (!isGapIndex(value)) {
@@ -293,13 +293,17 @@ function parseBookRef(value: unknown): ParseResult<BookRef | null> {
   if (!isNonEmptyString(value.section)) {
     return fail("bookRef.section must be a non-empty string");
   }
-  if (value.passageId !== undefined && !isNonEmptyString(value.passageId)) {
-    return fail("bookRef.passageId must be a non-empty string when provided");
+  let passageId: string | undefined;
+  if (value.passageId !== undefined && value.passageId !== null) {
+    if (!isNonEmptyString(value.passageId)) {
+      return fail("bookRef.passageId must be a non-empty string when provided");
+    }
+    passageId = value.passageId;
   }
   return ok({
     chapter: value.chapter,
     section: value.section,
-    ...(value.passageId !== undefined ? { passageId: value.passageId } : {}),
+    ...(passageId !== undefined ? { passageId } : {}),
   });
 }
 
