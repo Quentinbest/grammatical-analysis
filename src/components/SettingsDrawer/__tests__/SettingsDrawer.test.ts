@@ -507,6 +507,19 @@ describe("SettingsDrawer and App regressions", () => {
     expect(setApiKeyCalls).toEqual([
       { keyRef: "gemini", secretValue: "sk-gemini-shared-secret" },
     ]);
+
+    await act(async () => {
+      if (secretInput) setNativeValue(secretInput, "sk-gemini-unsaved-secret");
+    });
+    expect(secretInput?.value).toBe("sk-gemini-unsaved-secret");
+
+    const deepseekPresetBtn = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".drawer-presets button"),
+    ).find((b) => b.textContent?.trim() === "DeepSeek");
+    await act(async () => {
+      deepseekPresetBtn?.click();
+    });
+    expect(secretInput?.value).toBe("");
   });
 
   it("renders SelectionPill and dispatches confirm_selection_pill and dismiss_selection_pill", async () => {

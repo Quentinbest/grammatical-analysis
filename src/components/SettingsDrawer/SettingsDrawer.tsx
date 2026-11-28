@@ -199,6 +199,12 @@ const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   },
 ];
 
+function carryDraftSecret(prevApiKeyRef: string, nextApiKeyRef: string, prevSecret: string): string {
+  const prevRef = prevApiKeyRef.trim();
+  const nextRef = nextApiKeyRef.trim();
+  return prevRef.length > 0 && prevRef === nextRef ? prevSecret : "";
+}
+
 function newProviderDraft(): ProviderDraft {
   return {
     id: `prov-custom-${Date.now()}`,
@@ -601,12 +607,9 @@ export function SettingsDrawer({
                       className="app-btn"
                       onClick={() => {
                         const existing = providers.find((p) => p.id === preset.id);
-                        setProviderDraft((prev) =>
-                          existing
-                            ? {
-                                ...providerToDraft(existing),
-                                apiKeySecret: prev.apiKeySecret,
-                              }
+                        setProviderDraft((prev) => {
+                          const nextDraft = existing
+                            ? providerToDraft(existing)
                             : {
                                 id: preset.id,
                                 kind: preset.kind,
@@ -614,9 +617,17 @@ export function SettingsDrawer({
                                 baseUrl: preset.baseUrl,
                                 model: preset.model,
                                 apiKeyRef: preset.apiKeyRef,
-                                apiKeySecret: prev.apiKeySecret,
-                              },
-                        );
+                                apiKeySecret: "",
+                              };
+                          return {
+                            ...nextDraft,
+                            apiKeySecret: carryDraftSecret(
+                              prev.apiKeyRef,
+                              nextDraft.apiKeyRef,
+                              prev.apiKeySecret,
+                            ),
+                          };
+                        });
                         setProviderDirty(true);
                         setStatusMessage(null);
                         setErrorMessage(null);
@@ -639,12 +650,9 @@ export function SettingsDrawer({
                         data-model-preset={modelPreset.id}
                         onClick={() => {
                           const existing = providers.find((p) => p.id === modelPreset.id);
-                          setProviderDraft((prev) =>
-                            existing
-                              ? {
-                                  ...providerToDraft(existing),
-                                  apiKeySecret: prev.apiKeySecret,
-                                }
+                          setProviderDraft((prev) => {
+                            const nextDraft = existing
+                              ? providerToDraft(existing)
                               : {
                                   id: modelPreset.id,
                                   kind: modelPreset.kind,
@@ -652,9 +660,17 @@ export function SettingsDrawer({
                                   baseUrl: modelPreset.baseUrl,
                                   model: modelPreset.model,
                                   apiKeyRef: modelPreset.apiKeyRef,
-                                  apiKeySecret: prev.apiKeySecret,
-                                },
-                          );
+                                  apiKeySecret: "",
+                                };
+                            return {
+                              ...nextDraft,
+                              apiKeySecret: carryDraftSecret(
+                                prev.apiKeyRef,
+                                nextDraft.apiKeyRef,
+                                prev.apiKeySecret,
+                              ),
+                            };
+                          });
                           setProviderDirty(true);
                           setStatusMessage(null);
                           setErrorMessage(null);
