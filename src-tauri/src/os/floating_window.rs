@@ -5,9 +5,12 @@ use serde::{Deserialize, Serialize};
 use tauri::{PhysicalPosition, Position, Runtime, WebviewWindow};
 
 pub const FLOATING_WINDOW_LABEL: &str = "floating-card";
+pub const SELECTION_PILL_WINDOW_LABEL: &str = "selection-pill";
 pub const DEFAULT_WINDOW_MARGIN: i32 = 12;
 pub const DEFAULT_CURSOR_OFFSET_X: i32 = 14;
 pub const DEFAULT_CURSOR_OFFSET_Y: i32 = 18;
+pub const DEFAULT_PILL_OFFSET_X: i32 = 10;
+pub const DEFAULT_PILL_GAP_Y: i32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Point {
@@ -100,6 +103,52 @@ pub fn compute_floating_position(
     Point { x, y }
 }
 
+pub fn compute_pill_position(
+    cursor: Point,
+    window_size: Size,
+    monitor: Rect,
+    margin: i32,
+) -> Point {
+    let safe_margin = margin.max(0);
+    let win_w = window_size.width.max(0);
+    let win_h = window_size.height.max(0);
+    let mon_w = monitor.width.max(0);
+    let mon_h = monitor.height.max(0);
+
+    let x = clamp_axis(
+        cursor.x,
+        DEFAULT_PILL_OFFSET_X,
+        win_w,
+        monitor.x,
+        mon_w,
+        safe_margin,
+    );
+
+    let monitor_end = monitor.y.saturating_add(mon_h);
+    let min_padded = monitor.y.saturating_add(safe_margin);
+    let max_padded = monitor_end
+        .saturating_sub(safe_margin)
+        .saturating_sub(win_h);
+
+    let mut candidate_y = cursor
+        .y
+        .saturating_sub(DEFAULT_PILL_GAP_Y)
+        .saturating_sub(win_h);
+    if min_padded <= max_padded && candidate_y < min_padded {
+        candidate_y = cursor.y.saturating_add(DEFAULT_CURSOR_OFFSET_Y);
+    }
+
+    let y = if min_padded <= max_padded {
+        candidate_y.clamp(min_padded, max_padded)
+    } else if win_h <= mon_h {
+        candidate_y.clamp(monitor.y, monitor_end.saturating_sub(win_h))
+    } else {
+        monitor.y
+    };
+
+    Point { x, y }
+}
+
 fn clamp_axis(
     cursor_coord: i32,
     offset: i32,
@@ -113,25 +162,22 @@ fn clamp_axis(
     let max_padded = monitor_end
         .saturating_sub(margin)
         .saturating_sub(window_len);
+    let fits_with_margin = min_padded <= max_padded;
+    let fits_unpadded = window_len <= monitor_len;
 
-    // Default placement: offset positively from cursor.
     let mut candidate = cursor_coord.saturating_add(offset);
-
-    // If positive placement overflows the far edge, try flipping to the other side of the cursor.
-    if min_padded <= max_padded && candidate > max_padded {
+    if fits_with_margin && candidate > max_padded {
         candidate = cursor_coord
             .saturating_sub(offset)
             .saturating_sub(window_len);
     }
 
-    if min_padded <= max_padded {
+    if fits_with_margin {
         candidate.clamp(min_padded, max_padded)
-    } else if window_len <= monitor_len {
-        // Window fits inside monitor, just not with full margin on both sides.
+    } else if fits_unpadded {
         let max_unpadded = monitor_end.saturating_sub(window_len);
         candidate.clamp(monitor_origin, max_unpadded)
     } else {
-        // Window is larger than monitor; pin origin so the top-left stays visible.
         monitor_origin
     }
 }
@@ -162,7 +208,11 @@ pub fn show_floating_window_at<R: Runtime>(
     margin: i32,
     trigger_started: Instant,
 ) -> Result<FloatingWindowMetrics, FloatingWindowError> {
-    configure_floating_window(window)?;
+    if window.label() == "main" {
+        let _ = window.unminimize();
+    } else {
+        configure_floating_window(window)?;
+    }
     let position = compute_floating_position(cursor, window_size, monitor, margin);
 
     window
@@ -209,6 +259,35 @@ pub fn show_floating_window_near_cursor<R: Runtime>(
         margin,
         trigger_started,
     )
+}
+
+/// Positions and shows the non-activating selection pill near `cursor` without
+/// calling `.set_focus()` so the target desktop app retains focus and selection.
+pub fn show_pill_window_near_cursor<R: Runtime>(
+    window: &WebviewWindow<R>,
+    cursor: Point,
+    margin: i32,
+) -> Result<Point, FloatingWindowError> {
+    let outer = window
+        .outer_size()
+        .map_err(|e| FloatingWindowError::Tauri(e.to_string()))?;
+    let window_size = Size {
+        width: outer.width as i32,
+        height: outer.height as i32,
+    };
+    let monitor_rect = resolve_monitor_for_cursor(window, cursor)?;
+    let position = compute_pill_position(cursor, window_size, monitor_rect, margin);
+
+    window
+        .set_position(Position::Physical(PhysicalPosition::new(
+            position.x, position.y,
+        )))
+        .map_err(|e| FloatingWindowError::Tauri(e.to_string()))?;
+    window
+        .show()
+        .map_err(|e| FloatingWindowError::Tauri(e.to_string()))?;
+
+    Ok(position)
 }
 
 fn resolve_monitor_for_cursor<R: Runtime>(
@@ -290,7 +369,6 @@ mod tests {
             }
         );
 
-        // Near the right edge of the left monitor (x = -10) should clamp inside [-1908, -572].
         let edge_pos = compute_floating_position(Point { x: -10, y: 300 }, CARD, left_monitor, 12);
         assert!(edge_pos.x >= left_monitor.x + 12);
         assert!(edge_pos.x + CARD.width <= left_monitor.x + left_monitor.width - 12);
@@ -326,7 +404,6 @@ mod tests {
 
     #[test]
     fn handles_window_larger_than_padded_margin_or_monitor() {
-        // Window fits monitor (580x440) but not with 20px margins on both sides.
         let tight_monitor = Rect {
             x: 100,
             y: 50,
@@ -339,7 +416,6 @@ mod tests {
         assert!(pos.y >= tight_monitor.y);
         assert!(pos.y + CARD.height <= tight_monitor.y + tight_monitor.height);
 
-        // Window larger than monitor pins to monitor origin.
         let tiny_monitor = Rect {
             x: -800,
             y: -600,
@@ -348,5 +424,30 @@ mod tests {
         };
         let pinned = compute_floating_position(Point { x: -500, y: -400 }, CARD, tiny_monitor, 12);
         assert_eq!(pinned, Point { x: -800, y: -600 });
+    }
+
+    #[test]
+    fn places_pill_above_right_and_flips_below_near_top_edge() {
+        let pill = Size {
+            width: 148,
+            height: 42,
+        };
+        let above = compute_pill_position(Point { x: 400, y: 300 }, pill, PRIMARY, 12);
+        assert_eq!(
+            above,
+            Point {
+                x: 400 + DEFAULT_PILL_OFFSET_X,
+                y: 300 - DEFAULT_PILL_GAP_Y - pill.height,
+            }
+        );
+
+        let flipped_below = compute_pill_position(Point { x: 400, y: 24 }, pill, PRIMARY, 12);
+        assert_eq!(
+            flipped_below,
+            Point {
+                x: 400 + DEFAULT_PILL_OFFSET_X,
+                y: 24 + DEFAULT_CURSOR_OFFSET_Y,
+            }
+        );
     }
 }

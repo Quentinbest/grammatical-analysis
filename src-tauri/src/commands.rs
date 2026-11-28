@@ -1,16 +1,34 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tauri::ipc::Channel;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::domain::types::{
     AnalysisStreamEvent, CustomAction, ProviderConfig, RenderMode, RetrievalHit,
 };
-use crate::llm::{create_provider, AnalysisPromptRequest, CancellationToken, LlmProvider};
-use crate::os::clipboard::{ClipboardPort, SystemClipboard};
+use crate::llm::{
+    build_http_client, create_provider_with_client, AnalysisPromptRequest, CancellationToken,
+    LlmProvider, ProviderError,
+};
+use crate::os::clipboard::{
+    capture_selected_text, ClipboardPort, SystemClipboard, TargetedSystemClipboard,
+    DEFAULT_POLL_TIMEOUT_MS,
+};
+use crate::os::floating_window::{
+    show_floating_window_near_cursor, DEFAULT_WINDOW_MARGIN, SELECTION_PILL_WINDOW_LABEL,
+};
+use crate::os::hotkey::{
+    build_selection_error_payload, emit_selection_captured, emit_selection_error, HotkeyError,
+    SelectionCapturedPayload,
+};
+pub use crate::os::selection_monitor::SelectionAssistantStatus;
+use crate::os::selection_monitor::{
+    apply_popup_enabled, hide_pill_window, PendingSelection, SelectionAssistantState,
+};
 use crate::retrieval::{
     load_default_retriever, retrieve_book_context, Bm25BookRetriever, PromptBuilder, PromptConfig,
 };
@@ -38,6 +56,7 @@ pub struct AppState {
     resource_dir: Option<PathBuf>,
     retriever: OnceLock<Option<Bm25BookRetriever>>,
     prompt_builder: OnceLock<Option<PromptBuilder>>,
+    http_client: OnceLock<reqwest::Client>,
     in_flight: Mutex<HashMap<String, InFlightEntry>>,
 }
 
@@ -52,8 +71,18 @@ impl AppState {
             resource_dir,
             retriever: OnceLock::new(),
             prompt_builder: OnceLock::new(),
+            http_client: OnceLock::new(),
             in_flight: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn http_client(&self) -> Result<reqwest::Client, ProviderError> {
+        if let Some(client) = self.http_client.get() {
+            return Ok(client.clone());
+        }
+        let built = build_http_client()?;
+        let _ = self.http_client.set(built.clone());
+        Ok(self.http_client.get().cloned().unwrap_or(built))
     }
 
     pub fn retrieve_context(&self, source_text: &str, limit: usize) -> Vec<RetrievalHit> {
@@ -298,7 +327,11 @@ pub async fn run_analysis(
     let _ = channel.send(AnalysisStreamEvent::RetrievalReady { hits: hits.clone() });
 
     let prompt_req = build_prompt_request(&state, &action, source_text, &hits, cancel);
-    let client = create_provider(&provider, api_key).map_err(|err| {
+    let http_client = state.http_client().map_err(|err| {
+        let _ = channel.send(err.to_failed_event());
+        err.to_string()
+    })?;
+    let client = create_provider_with_client(http_client, &provider, api_key).map_err(|err| {
         let _ = channel.send(err.to_failed_event());
         err.to_string()
     })?;
@@ -383,14 +416,136 @@ pub fn list_history(
         .map_err(|e| e.to_string())
 }
 
+const DEFERRED_COPY_FOCUS_SETTLE_DELAY: Duration = Duration::from_millis(80);
+
 #[tauri::command]
 pub fn read_clipboard_text() -> Result<Option<String>, String> {
     SystemClipboard.read_text().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn get_selection_assistant_status(
+    assistant: State<'_, Arc<SelectionAssistantState>>,
+) -> Result<SelectionAssistantStatus, String> {
+    Ok(assistant.status())
+}
+
+#[tauri::command]
+pub fn set_selection_popup_enabled(
+    enabled: bool,
+    app: AppHandle,
+    assistant: State<'_, Arc<SelectionAssistantState>>,
+) -> Result<SelectionAssistantStatus, String> {
+    Ok(apply_popup_enabled(&app, &assistant, enabled))
+}
+
+#[tauri::command]
+pub fn dismiss_selection_pill(
+    app: AppHandle,
+    assistant: State<'_, Arc<SelectionAssistantState>>,
+) -> Result<(), String> {
+    assistant.clear_pending();
+    hide_pill_window(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn confirm_selection_pill(
+    app: AppHandle,
+    assistant: State<'_, Arc<SelectionAssistantState>>,
+) -> Result<(), String> {
+    let pending = assistant.take_pending();
+    if let Some(pill) = app.get_webview_window(SELECTION_PILL_WINDOW_LABEL) {
+        let _ = pill.hide();
+    } else {
+        hide_pill_window(&app);
+    }
+
+    let Some(pending) = pending else {
+        return Ok(());
+    };
+
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        let trigger_started = Instant::now();
+        let cursor = match pending {
+            PendingSelection::Resolved { text, cursor } => {
+                let payload = SelectionCapturedPayload {
+                    text,
+                    cursor,
+                    hotkey: "SelectionPill".into(),
+                    latency_ms: 0,
+                };
+                if let Err(err) = emit_selection_captured(&app_handle, &payload) {
+                    eprintln!("failed to emit selection://captured: {err}");
+                }
+                cursor
+            }
+            PendingSelection::DeferredCopy { cursor, source_pid } => {
+                std::thread::sleep(DEFERRED_COPY_FOCUS_SETTLE_DELAY);
+                let clipboard = TargetedSystemClipboard {
+                    target_pid: source_pid,
+                };
+                match capture_selected_text(&clipboard, DEFAULT_POLL_TIMEOUT_MS) {
+                    Ok(text) => {
+                        let payload = SelectionCapturedPayload {
+                            text,
+                            cursor,
+                            hotkey: "SelectionPill".into(),
+                            latency_ms: trigger_started.elapsed().as_millis() as u64,
+                        };
+                        if let Err(err) = emit_selection_captured(&app_handle, &payload) {
+                            eprintln!("failed to emit selection://captured: {err}");
+                        }
+                    }
+                    Err(err) => {
+                        let payload = build_selection_error_payload(
+                            &HotkeyError::CaptureFailed(err),
+                            "SelectionPill",
+                        );
+                        if let Err(emit_err) = emit_selection_error(&app_handle, &payload) {
+                            eprintln!("failed to emit selection://error: {emit_err}");
+                        }
+                    }
+                }
+                cursor
+            }
+        };
+
+        let main_app = app_handle.clone();
+        if let Err(err) = app_handle.run_on_main_thread(move || {
+            if let Some(win) = main_app.get_webview_window("main") {
+                if let Err(place_err) = show_floating_window_near_cursor(
+                    &win,
+                    cursor,
+                    DEFAULT_WINDOW_MARGIN,
+                    trigger_started,
+                ) {
+                    eprintln!("main window placement after pill confirm failed: {place_err}");
+                }
+            }
+        }) {
+            eprintln!("failed to dispatch main window show to main thread: {err}");
+        }
+    });
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_assistant_status_serializes_camel_case_fields() {
+        let state = SelectionAssistantState::new();
+        state.set_resident_in_tray(true);
+        let status = state.status();
+        let json = serde_json::to_value(status).expect("serialize status");
+        assert_eq!(json.get("popupEnabled").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(json.get("residentInTray").and_then(|v| v.as_bool()), Some(true));
+        assert!(json.get("accessibilityTrusted").and_then(|v| v.as_bool()).is_some());
+    }
 
     #[test]
     fn resolve_api_key_does_not_leak_openai_env_to_custom_provider() {
@@ -446,5 +601,16 @@ mod tests {
         assert_eq!(resolved.as_deref(), Some(prompts_dir.as_path()));
 
         let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn app_state_initializes_and_caches_shared_http_client() {
+        let storage = Arc::new(Storage::open_in_memory().expect("in-memory db"));
+        let state = AppState::new(storage);
+
+        assert!(state.http_client.get().is_none());
+        let _first = state.http_client().expect("first http client init");
+        assert!(state.http_client.get().is_some());
+        let _second = state.http_client().expect("cached http client reuse");
     }
 }
