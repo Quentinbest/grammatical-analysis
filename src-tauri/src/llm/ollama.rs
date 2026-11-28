@@ -7,6 +7,7 @@ use crate::domain::types::AnalysisStreamEvent;
 
 use super::provider::{
     join_endpoint, send_and_stream, AnalysisPromptRequest, LlmProvider, ProviderError,
+    StreamControl, StreamFrame,
 };
 use super::sse::NdjsonParser;
 
@@ -145,19 +146,23 @@ impl LlmProvider for OllamaProvider {
                 request.timeout,
                 &request.cancel,
                 &on_event,
-                |maybe_bytes| {
-                    match maybe_bytes {
-                        Some(bytes) => parser.feed(bytes, |line| {
+                |frame| {
+                    match frame {
+                        StreamFrame::Chunk(bytes) => parser.feed(bytes, |line| {
                             handle_line(line, &mut accumulated, &mut done, &mut parse_error);
                         }),
-                        None => parser.finish(|line| {
+                        StreamFrame::Eof => parser.finish(|line| {
                             handle_line(line, &mut accumulated, &mut done, &mut parse_error);
                         }),
                     }
                     if let Some(err) = parse_error.take() {
                         return Err(err);
                     }
-                    Ok(done)
+                    Ok(if done {
+                        StreamControl::Done
+                    } else {
+                        StreamControl::Continue
+                    })
                 },
             )
             .await?;

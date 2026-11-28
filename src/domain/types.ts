@@ -5,7 +5,7 @@ export type TokenId = string & { readonly __brand: "TokenId" };
 export type ClauseId = string & { readonly __brand: "ClauseId" };
 export type GapIndex = 1 | 2 | 3;
 
-export type SyntacticRole = "subj" | "pred" | "obj" | "mod";
+export type SyntacticRole = "subj" | "pred" | "obj" | "comp" | "mod";
 export type CardTheme = "dark-ink" | "warm-paper";
 
 function isNonEmptyString(value: unknown): value is string {
@@ -37,7 +37,13 @@ export function isGapIndex(value: unknown): value is GapIndex {
 }
 
 export function isSyntacticRole(value: unknown): value is SyntacticRole {
-  return value === "subj" || value === "pred" || value === "obj" || value === "mod";
+  return (
+    value === "subj" ||
+    value === "pred" ||
+    value === "obj" ||
+    value === "comp" ||
+    value === "mod"
+  );
 }
 
 export function isCardTheme(value: unknown): value is CardTheme {
@@ -83,7 +89,7 @@ export interface InlineConnector {
   readonly note: string;
 }
 
-export type ClauseItem = SubToken | GapSlot | InlineConnector;
+export type ClauseItem = SubToken | GapSlot | InlineConnector | ClauseGroup;
 
 export interface ClauseGroup {
   readonly kind: "clause";
@@ -100,7 +106,7 @@ export interface PunctuationPart {
   readonly text: string;
 }
 
-export type SentencePart = MainToken | ClauseGroup | PunctuationPart;
+export type SentencePart = MainToken | ClauseGroup | InlineConnector | PunctuationPart;
 
 export interface BookRef {
   readonly chapter: string;

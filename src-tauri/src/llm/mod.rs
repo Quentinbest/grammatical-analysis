@@ -8,8 +8,8 @@ pub use anthropic::AnthropicProvider;
 pub use ollama::OllamaProvider;
 pub use openai_compat::OpenAiCompatProvider;
 pub use provider::{
-    create_provider, AnalysisPromptRequest, CancellationToken, LlmProvider, ProviderClient,
-    ProviderError,
+    build_http_client, create_provider, create_provider_with_client, AnalysisPromptRequest,
+    CancellationToken, LlmProvider, ProviderClient, ProviderError,
 };
 pub use sse::{NdjsonParser, SseEvent, SseParser};
 
@@ -25,7 +25,6 @@ mod tests {
 
     use super::*;
 
-    /// Spawns a single-request local HTTP mock server and returns `(base_url, captured_request)`.
     async fn spawn_mock_server<F, Fut>(handler: F) -> (String, tokio::task::JoinHandle<String>)
     where
         F: FnOnce(tokio::net::TcpStream, String) -> Fut + Send + 'static,
@@ -185,7 +184,6 @@ mod tests {
     #[tokio::test]
     async fn openai_compat_streams_sse_deltas_and_completed() {
         let (base_url, req_handle) = spawn_mock_server(|mut stream, _| async move {
-            // Intentionally split one SSE frame across two TCP chunks.
             let chunks = [
                 "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"meaning\\\":\"}}]}\n",
                 "\ndata: {\"choices\":[{\"delta\":{\"content\":\"\\\"hi\\\"}\"}}]}\n\n",
@@ -461,7 +459,6 @@ mod tests {
     #[tokio::test]
     async fn stalled_server_triggers_timeout_error() {
         let (base_url, _handle) = spawn_mock_server(|stream, _| async move {
-            // Keep TCP stream open without sending response headers.
             tokio::time::sleep(Duration::from_secs(5)).await;
             drop(stream);
         })
@@ -995,6 +992,88 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_compat_sets_low_reasoning_effort_only_for_gemini_and_respects_override() {
+        let googleapis_config = ProviderConfig::OpenaiCompatible {
+            id: "prov-gemini-host".into(),
+            name: "Gemini Host".into(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+            api_key_ref: "gemini".into(),
+            model: "custom-gemini-endpoint-model".into(),
+        };
+        let ProviderClient::OpenaiCompatible(googleapis_provider) =
+            create_provider(&googleapis_config, Some("gm-key".into())).unwrap()
+        else {
+            panic!("expected OpenaiCompatible provider");
+        };
+        let googleapis_body = serde_json::to_value(
+            googleapis_provider.build_request_body(&AnalysisPromptRequest::new("sys", "usr")),
+        )
+        .expect("serialize googleapis body");
+        assert_eq!(
+            googleapis_body
+                .get("reasoning_effort")
+                .and_then(|v| v.as_str()),
+            Some("low")
+        );
+        assert!(googleapis_body.get("max_tokens").is_none());
+
+        let wire_cases: [(&str, Option<&str>, Option<&str>); 5] = [
+            ("gemini-4-hydrogen", None, Some("low")),
+            ("gemini-3.8-flash", None, Some("low")),
+            ("gemini-4-hydrogen", Some("high"), Some("high")),
+            ("gpt-6.2-sol", None, None),
+            ("deepseek-v4.1-flash-1017", None, None),
+        ];
+
+        for (model, explicit_effort, expected_effort) in wire_cases {
+            let (base_url, req_handle) = spawn_mock_server(|mut stream, _| async move {
+                let chunks = [
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                    "data: [DONE]\n\n",
+                ];
+                write_chunked_http(&mut stream, "text/event-stream", &chunks, None).await;
+            })
+            .await;
+
+            let config = ProviderConfig::OpenaiCompatible {
+                id: "prov-wire-case".into(),
+                name: "Wire Case".into(),
+                base_url: format!("{base_url}/v1"),
+                api_key_ref: "key".into(),
+                model: model.into(),
+            };
+            let client = build_http_client().expect("build shared http client");
+            let provider =
+                create_provider_with_client(client, &config, Some("sk-test".into())).unwrap();
+
+            let mut req = AnalysisPromptRequest::new("sys", "usr");
+            req.reasoning_effort = explicit_effort.map(str::to_string);
+
+            provider
+                .stream_analysis(req, |_| {})
+                .await
+                .expect("stream succeeds");
+
+            let raw_req = req_handle.await.expect("server join");
+            let (_, body_str) = raw_req
+                .split_once("\r\n\r\n")
+                .expect("HTTP request must have header/body separator");
+            let body: serde_json::Value =
+                serde_json::from_str(body_str).expect("request body must be valid JSON");
+
+            assert_eq!(
+                body.get("reasoning_effort").and_then(|v| v.as_str()),
+                expected_effort,
+                "model={model}, explicit={explicit_effort:?}, body={body}"
+            );
+            assert!(
+                body.get("max_tokens").is_none(),
+                "model={model} default request must omit max_tokens, got: {body}"
+            );
         }
     }
 }

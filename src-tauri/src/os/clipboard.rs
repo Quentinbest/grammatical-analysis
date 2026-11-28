@@ -130,6 +130,60 @@ pub fn capture_selected_text_with_interval<P: ClipboardPort + ?Sized>(
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemClipboard;
 
+/// OS clipboard adapter that re-activates `target_pid` before simulating `Cmd+C`
+/// when a secondary floating window click may have shifted frontmost app focus.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TargetedSystemClipboard {
+    pub target_pid: Option<i32>,
+}
+
+impl ClipboardPort for TargetedSystemClipboard {
+    fn read_text(&self) -> Result<Option<String>, ClipboardError> {
+        SystemClipboard.read_text()
+    }
+
+    fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
+        SystemClipboard.write_text(text)
+    }
+
+    fn simulate_copy(&self) -> Result<(), ClipboardError> {
+        #[cfg(target_os = "macos")]
+        {
+            let self_pid = std::process::id() as i32;
+            let script = match self.target_pid.filter(|&pid| pid > 0 && pid != self_pid) {
+                Some(pid) => format!(
+                    "tell application \"System Events\"\n\
+                       try\n\
+                         set frontmost of first process whose unix id is {pid} to true\n\
+                         delay 0.05\n\
+                       end try\n\
+                       keystroke \"c\" using command down\n\
+                     end tell"
+                ),
+                None => {
+                    "tell application \"System Events\" to keystroke \"c\" using command down"
+                        .to_string()
+                }
+            };
+            let output = std::process::Command::new("osascript")
+                .args(["-e", &script])
+                .output()
+                .map_err(|e| ClipboardError::SimulateCopyFailed(e.to_string()))?;
+            if !output.status.success() {
+                return Err(ClipboardError::SimulateCopyFailed(
+                    String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                ));
+            }
+            Ok(())
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            SystemClipboard.simulate_copy()
+        }
+    }
+}
+
 impl ClipboardPort for SystemClipboard {
     fn read_text(&self) -> Result<Option<String>, ClipboardError> {
         #[cfg(target_os = "macos")]

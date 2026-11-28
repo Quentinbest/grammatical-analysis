@@ -1,4 +1,11 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { type FormEvent, useEffect, useState } from "react";
+import {
+  type VendorId,
+  getModelsForVendor,
+  resolveVendorId,
+} from "../../domain/modelCatalog.ts";
 import {
   type ActionId,
   type CardId,
@@ -9,6 +16,7 @@ import {
   isActionId,
   isProviderId,
 } from "../../domain/types.ts";
+import { VendorIcon } from "../VendorIcon/index.ts";
 import "./SettingsDrawer.css";
 
 export interface HistoryEntry {
@@ -59,6 +67,25 @@ interface ActionDraft {
   readonly cssTemplate: string;
 }
 
+function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+function parseSelectionAssistantEnabled(raw: unknown): boolean | null {
+  if (typeof raw === "boolean") {
+    return raw;
+  }
+  if (typeof raw === "object" && raw !== null) {
+    if ("enabled" in raw && typeof raw.enabled === "boolean") {
+      return raw.enabled;
+    }
+    if ("popupEnabled" in raw && typeof raw.popupEnabled === "boolean") {
+      return raw.popupEnabled;
+    }
+  }
+  return null;
+}
+
 function providerToDraft(provider: ProviderConfig): ProviderDraft {
   switch (provider.kind) {
     case "ollama":
@@ -100,6 +127,8 @@ function providerToDraft(provider: ProviderConfig): ProviderDraft {
 
 interface ProviderPreset {
   readonly id: string;
+  readonly vendor: VendorId;
+  readonly kind: ProviderKind;
   readonly label: string;
   readonly name: string;
   readonly baseUrl: string;
@@ -109,30 +138,72 @@ interface ProviderPreset {
 
 const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   {
-    id: "provider-openrouter",
-    label: "OpenRouter",
-    name: "Cloud · OpenRouter (Claude Sonnet 4)",
-    baseUrl: "https://openrouter.ai/api/v1",
-    model: "anthropic/claude-sonnet-4",
-    apiKeyRef: "openrouter",
+    id: "prov-openai",
+    vendor: "openai",
+    kind: "openai-compatible",
+    label: "OpenAI",
+    name: "OpenAI · GPT-6.2 Sol",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-6.2-sol",
+    apiKeyRef: "key:openai",
+  },
+  {
+    id: "prov-anthropic",
+    vendor: "anthropic",
+    kind: "anthropic",
+    label: "Anthropic",
+    name: "Anthropic · Claude Sonnet 5.5",
+    baseUrl: "https://api.anthropic.com",
+    model: "claude-sonnet-5-5",
+    apiKeyRef: "key:anthropic",
   },
   {
     id: "provider-deepseek",
+    vendor: "deepseek",
+    kind: "openai-compatible",
     label: "DeepSeek",
-    name: "Cloud · DeepSeek (deepseek-chat)",
+    name: "DeepSeek · DeepSeek V4.1 Flash",
     baseUrl: "https://api.deepseek.com/v1",
-    model: "deepseek-chat",
+    model: "deepseek-v4.1-flash-1017",
     apiKeyRef: "deepseek",
   },
   {
     id: "provider-gemini",
+    vendor: "gemini",
+    kind: "openai-compatible",
     label: "Gemini",
-    name: "Cloud · Gemini (gemini-2.5-flash)",
+    name: "Google · Gemini 3.8 Flash",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    model: "gemini-2.5-flash",
+    model: "gemini-3.8-flash",
     apiKeyRef: "gemini",
   },
+  {
+    id: "provider-openrouter",
+    vendor: "openrouter",
+    kind: "openai-compatible",
+    label: "OpenRouter",
+    name: "OpenRouter · Claude Sonnet 5.5",
+    baseUrl: "https://openrouter.ai/api/v1",
+    model: "anthropic/claude-sonnet-5.5",
+    apiKeyRef: "openrouter",
+  },
+  {
+    id: "prov-ollama",
+    vendor: "ollama",
+    kind: "ollama",
+    label: "Ollama",
+    name: "Ollama · Qwen 2.5 14B",
+    baseUrl: "http://localhost:11434",
+    model: "qwen2.5:14b",
+    apiKeyRef: "",
+  },
 ];
+
+function carryDraftSecret(prevApiKeyRef: string, nextApiKeyRef: string, prevSecret: string): string {
+  const prevRef = prevApiKeyRef.trim();
+  const nextRef = nextApiKeyRef.trim();
+  return prevRef.length > 0 && prevRef === nextRef ? prevSecret : "";
+}
 
 function newProviderDraft(): ProviderDraft {
   return {
@@ -204,6 +275,7 @@ export function SettingsDrawer({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [selectionPopupEnabled, setSelectionPopupEnabled] = useState(true);
 
   useEffect(() => {
     if (providerDirty) {
@@ -226,13 +298,47 @@ export function SettingsDrawer({
   }, [actions, actionDirty]);
 
   useEffect(() => {
-    if (isOpen) {
-      setStatusMessage(null);
-      setErrorMessage(null);
-    } else {
+    if (!isOpen) {
       setProviderDirty(false);
       setActionDirty(false);
+      return undefined;
     }
+    setStatusMessage(null);
+    setErrorMessage(null);
+    if (!isTauriRuntime()) {
+      return undefined;
+    }
+    let active = true;
+    let unlistenStatus: (() => void) | null = null;
+    void invoke<unknown>("get_selection_assistant_status")
+      .then((raw) => {
+        if (!active) {
+          return;
+        }
+        const parsed = parseSelectionAssistantEnabled(raw);
+        if (parsed !== null) {
+          setSelectionPopupEnabled(parsed);
+        }
+      })
+      .catch(() => {});
+    void listen<unknown>("assistant://status", (event) => {
+      const parsed = parseSelectionAssistantEnabled(event.payload);
+      if (parsed !== null) {
+        setSelectionPopupEnabled(parsed);
+      }
+    })
+      .then((fn) => {
+        if (active) {
+          unlistenStatus = fn;
+        } else {
+          fn();
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      unlistenStatus?.();
+    };
   }, [isOpen, tab]);
 
   if (!isOpen) {
@@ -242,6 +348,26 @@ export function SettingsDrawer({
   const hasSavedKey =
     providerDraft.apiKeyRef.trim().length > 0 &&
     configuredKeyRefs.includes(providerDraft.apiKeyRef.trim());
+
+  const activeDraftVendor = resolveVendorId({
+    id: providerDraft.id,
+    baseUrl: providerDraft.baseUrl,
+    model: providerDraft.model,
+    kind: providerDraft.kind,
+  });
+  const vendorModelPresets = getModelsForVendor(activeDraftVendor);
+
+  const handleToggleSelectionPopup = async () => {
+    const next = !selectionPopupEnabled;
+    setSelectionPopupEnabled(next);
+    if (isTauriRuntime()) {
+      try {
+        await invoke("set_selection_popup_enabled", { enabled: next });
+      } catch {
+        setSelectionPopupEnabled(!next);
+      }
+    }
+  };
 
   const handleProviderSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -410,30 +536,55 @@ export function SettingsDrawer({
         </nav>
 
         <div className="drawer-body">
+          <div className="drawer-assistant-row">
+            <div className="drawer-assistant-info">
+              <span className="drawer-assistant-title">Background Selection Assistant</span>
+              <span className="drawer-assistant-desc">
+                Show floating confirmation pill when selecting English sentences
+              </span>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={selectionPopupEnabled}
+              aria-label="Background Selection Assistant"
+              className={`app-btn${selectionPopupEnabled ? " primary" : ""}`}
+              onClick={() => void handleToggleSelectionPopup()}
+            >
+              {selectionPopupEnabled ? "Enabled" : "Paused"}
+            </button>
+          </div>
+
           {tab === "providers" ? (
             <>
               <div className="drawer-list">
-                {providers.map((provider) => (
-                  <button
-                    key={provider.id}
-                    type="button"
-                    className={`drawer-item${providerDraft.id === provider.id ? " active" : ""}`}
-                    onClick={() => {
-                      setProviderDraft(providerToDraft(provider));
-                      setProviderDirty(false);
-                      setStatusMessage(null);
-                      setErrorMessage(null);
-                    }}
-                  >
-                    <span className="drawer-item-title">
-                      <span>{provider.name}</span>
-                      <span>{provider.kind}</span>
-                    </span>
-                    <span className="drawer-item-meta">
-                      {provider.model} · {provider.baseUrl}
-                    </span>
-                  </button>
-                ))}
+                {providers.map((provider) => {
+                  const vendor = resolveVendorId(provider);
+                  return (
+                    <button
+                      key={provider.id}
+                      type="button"
+                      className={`drawer-item${providerDraft.id === provider.id ? " active" : ""}`}
+                      onClick={() => {
+                        setProviderDraft(providerToDraft(provider));
+                        setProviderDirty(false);
+                        setStatusMessage(null);
+                        setErrorMessage(null);
+                      }}
+                    >
+                      <span className="drawer-item-title">
+                        <span className="drawer-item-brand">
+                          <VendorIcon vendor={vendor} size={15} />
+                          <span>{provider.name}</span>
+                        </span>
+                        <span>{provider.kind}</span>
+                      </span>
+                      <span className="drawer-item-meta">
+                        {provider.model} · {provider.baseUrl}
+                      </span>
+                    </button>
+                  );
+                })}
                 <button
                   type="button"
                   className="app-btn"
@@ -456,28 +607,80 @@ export function SettingsDrawer({
                       className="app-btn"
                       onClick={() => {
                         const existing = providers.find((p) => p.id === preset.id);
-                        setProviderDraft(
-                          existing
+                        setProviderDraft((prev) => {
+                          const nextDraft = existing
                             ? providerToDraft(existing)
                             : {
                                 id: preset.id,
-                                kind: "openai-compatible",
+                                kind: preset.kind,
                                 name: preset.name,
                                 baseUrl: preset.baseUrl,
                                 model: preset.model,
                                 apiKeyRef: preset.apiKeyRef,
                                 apiKeySecret: "",
-                              },
-                        );
+                              };
+                          return {
+                            ...nextDraft,
+                            apiKeySecret: carryDraftSecret(
+                              prev.apiKeyRef,
+                              nextDraft.apiKeyRef,
+                              prev.apiKeySecret,
+                            ),
+                          };
+                        });
                         setProviderDirty(true);
                         setStatusMessage(null);
                         setErrorMessage(null);
                       }}
                     >
+                      <VendorIcon vendor={preset.vendor} size={14} />
                       {preset.label}
                     </button>
                   ))}
                 </div>
+
+                {vendorModelPresets.length > 0 ? (
+                  <div className="drawer-model-chips" aria-label="Vendor models">
+                    <span className="drawer-presets-label">Models:</span>
+                    {vendorModelPresets.map((modelPreset) => (
+                      <button
+                        key={modelPreset.id}
+                        type="button"
+                        className={`app-btn${providerDraft.model === modelPreset.model ? " primary" : ""}`}
+                        data-model-preset={modelPreset.id}
+                        onClick={() => {
+                          const existing = providers.find((p) => p.id === modelPreset.id);
+                          setProviderDraft((prev) => {
+                            const nextDraft = existing
+                              ? providerToDraft(existing)
+                              : {
+                                  id: modelPreset.id,
+                                  kind: modelPreset.kind,
+                                  name: modelPreset.name,
+                                  baseUrl: modelPreset.baseUrl,
+                                  model: modelPreset.model,
+                                  apiKeyRef: modelPreset.apiKeyRef,
+                                  apiKeySecret: "",
+                                };
+                            return {
+                              ...nextDraft,
+                              apiKeySecret: carryDraftSecret(
+                                prev.apiKeyRef,
+                                nextDraft.apiKeyRef,
+                                prev.apiKeySecret,
+                              ),
+                            };
+                          });
+                          setProviderDirty(true);
+                          setStatusMessage(null);
+                          setErrorMessage(null);
+                        }}
+                      >
+                        {modelPreset.shortLabel}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
 
                 <label className="drawer-field">
                   Provider Kind
@@ -510,7 +713,7 @@ export function SettingsDrawer({
                       setProviderDirty(true);
                       setProviderDraft((prev) => ({ ...prev, name: e.target.value }));
                     }}
-                    placeholder="e.g. Local Ollama or Cloud OpenAI"
+                    placeholder="e.g. OpenAI · GPT-6.2 Sol"
                   />
                 </label>
 

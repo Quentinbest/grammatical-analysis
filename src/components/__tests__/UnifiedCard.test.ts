@@ -299,4 +299,143 @@ describe("UnifiedCard", () => {
     expect(staticOval?.textContent).toContain("Because");
     expect(staticOval?.classList.contains("conn-interactive")).toBe(false);
   });
+
+  it("renders u-comp complement role, nested clauses, [断句] toggle, and calm usage-note-strip", () => {
+    const nestedCompCard = parseGrammarCard(
+      {
+        meaning: "我不认为它是唯一能解决这个问题的团队，而且那只是开始。",
+        parts: [
+          { kind: "token", id: "t1", text: "I", role: "subj", note: "主语。" },
+          { kind: "token", id: "t2", text: "don't think", role: "pred", subLabel: "否定转移", note: "谓语。" },
+          {
+            kind: "clause",
+            id: "c1",
+            badge: "宾语从句",
+            omittedHint: "(that)",
+            items: [
+              { kind: "sub-token", id: "st1", text: "it", role: "subj", note: "从句主语。" },
+              { kind: "sub-token", id: "st2", text: "is", role: "pred", note: "系动词。" },
+              {
+                kind: "sub-token",
+                id: "st3",
+                text: "the only team",
+                role: "comp",
+                antecedentIndex: 1,
+                note: "主语补语。",
+              },
+              {
+                kind: "clause",
+                id: "c2",
+                badge: "定语从句",
+                connector: "that",
+                items: [
+                  { kind: "connector", id: "cn1", text: "that", badge: "关系代词", note: "引导定语从句。" },
+                  { kind: "gap", id: "g1", index: 1, note: "主语空位。" },
+                  { kind: "sub-token", id: "st4", text: "can solve", role: "pred", note: "定语从句谓语。" },
+                  { kind: "sub-token", id: "st5", text: "it", role: "obj", note: "宾语。" },
+                ],
+              },
+            ],
+          },
+          { kind: "punct", text: "," },
+          { kind: "connector", id: "cn-and", text: "and", badge: "并列连词", note: "并列分句连接词。" },
+          { kind: "token", id: "t3", text: "that", role: "subj", note: "指示代词主语。" },
+          { kind: "token", id: "t4", text: "is", role: "pred", note: "系动词。" },
+          { kind: "token", id: "t5", text: "the start", role: "comp", note: "表语补语。" },
+          { kind: "punct", text: "." },
+        ],
+        recombination: "主干与嵌套从句。",
+        caveatNote: "think 否定转移至宾语从句语义。",
+        bookRef: { chapter: "ch17", section: "名词子句" },
+      },
+      "I don't think it is the only team that can solve it, and that is the start.",
+    );
+
+    act(() => {
+      root.render(createElement(UnifiedCard, { card: nestedCompCard, theme: "dark-ink" }));
+    });
+
+    // Legend includes 补语 and token renders .u-comp
+    expect(container.querySelector(".legend")?.textContent).toContain("补语");
+    expect(container.querySelector('[data-tok-id="t5"]')?.classList.contains("u-comp")).toBe(true);
+    expect(container.querySelector('[data-tok-id="st3"]')?.classList.contains("u-comp")).toBe(true);
+
+    // Nested clause renders .nested-clause
+    const nestedClauseEl = container.querySelector('[data-clause-id="c2"]');
+    expect(nestedClauseEl?.classList.contains("nested-clause")).toBe(true);
+
+    // Calm usage-note-strip is used instead of red caveat-strip on StructuredCardView
+    expect(container.querySelector(".usage-note-strip")?.textContent).toContain("否定转移");
+    expect(container.querySelector(".caveat-strip")).toBeNull();
+
+    // Selecting nested token then folding outer clause clears inspector selection,
+    // updates fold-all to "展开全部从句", and clears .has-trace when no gaps remain visible
+    act(() => {
+      container.querySelector<HTMLElement>('[data-tok-id="st4"]')?.click();
+    });
+    expect(container.querySelector(".inspector-head")?.textContent).toContain("can solve");
+
+    act(() => {
+      container.querySelector<HTMLButtonElement>('[data-fold-clause="c1"]')?.click();
+    });
+    expect(container.querySelector(".inspector-head")?.textContent).toContain("结构要点");
+    const foldAllBtn = container.querySelector<HTMLButtonElement>('[data-action="fold-all"]');
+    expect(foldAllBtn?.textContent).toBe("展开全部从句");
+    expect(container.querySelector(".sent-wrap")?.classList.contains("has-trace")).toBe(false);
+
+    act(() => {
+      foldAllBtn?.click();
+    });
+    expect(foldAllBtn?.textContent).toBe("折叠修饰看主干");
+    expect(container.querySelector(".sent-wrap")?.classList.contains("has-trace")).toBe(true);
+
+    // [断句] toggle adds data-linebreak="true" and renders .sent-linebreak <br> elements
+    const lineBreakBtn = container.querySelector<HTMLButtonElement>('[data-action="toggle-linebreak"]');
+    expect(lineBreakBtn?.textContent).toBe("断句");
+    expect(container.querySelectorAll(".sent-linebreak").length).toBe(0);
+
+    act(() => {
+      lineBreakBtn?.click();
+    });
+    expect(container.querySelector(".sent-body")?.getAttribute("data-linebreak")).toBe("true");
+    expect(container.querySelectorAll(".sent-linebreak").length).toBe(2);
+  });
+
+  it("inserts a line break after a leading subordinate clause when [断句] is toggled", () => {
+    const leadingClauseCard = parseGrammarCard(
+      {
+        meaning: "走回家时，雨开始下了。",
+        parts: [
+          {
+            kind: "clause",
+            id: "c1",
+            badge: "状语从句",
+            connector: "While",
+            items: [{ kind: "sub-token", id: "st1", text: "walking home", role: "pred", note: "时间状语。" }],
+          },
+          { kind: "punct", text: "," },
+          { kind: "token", id: "t1", text: "the rain", role: "subj", note: "主语。" },
+          { kind: "token", id: "t2", text: "started", role: "pred", note: "谓语。" },
+          { kind: "punct", text: "." },
+        ],
+        recombination: "先交代时间背景，再引出主句动作。",
+        caveatNote: null,
+        bookRef: null,
+      },
+      "While walking home, the rain started.",
+    );
+
+    act(() => {
+      root.render(createElement(UnifiedCard, { card: leadingClauseCard, theme: "dark-ink" }));
+    });
+
+    const lineBreakBtn = container.querySelector<HTMLButtonElement>('[data-action="toggle-linebreak"]');
+    expect(lineBreakBtn).not.toBeNull();
+    expect(container.querySelectorAll(".sent-linebreak").length).toBe(0);
+
+    act(() => {
+      lineBreakBtn?.click();
+    });
+    expect(container.querySelectorAll(".sent-linebreak").length).toBe(1);
+  });
 });

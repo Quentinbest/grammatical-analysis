@@ -1,9 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { type Window, getCurrentWindow } from "@tauri-apps/api/window";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CustomTemplateSandbox } from "./components/CustomTemplateSandbox/index.ts";
+import { ModelPicker } from "./components/ModelPicker/index.ts";
 import { type HistoryEntry, SettingsDrawer } from "./components/SettingsDrawer/index.ts";
 import { UnifiedCard } from "./components/UnifiedCard/index.ts";
+import { buildDefaultProviders } from "./domain/modelCatalog.ts";
 import {
   type ActionId,
   type CardTheme,
@@ -11,7 +14,6 @@ import {
   type ProviderConfig,
   type ProviderId,
   isActionId,
-  isProviderId,
 } from "./domain/types.ts";
 import { type CompletedAnalysisPayload, useAnalysisStream } from "./hooks/useAnalysisStream.ts";
 import "./styles/tokens.css";
@@ -32,82 +34,15 @@ function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-function buildFallbackProviders(): readonly ProviderConfig[] {
-  const ollamaId = "prov-ollama";
-  const lmstudioId = "prov-lmstudio";
-  const openaiId = "prov-openai";
-  const anthropicId = "prov-anthropic";
-  const openrouterId = "provider-openrouter";
-  const deepseekId = "provider-deepseek";
-  const geminiId = "provider-gemini";
-  if (
-    !isProviderId(ollamaId) ||
-    !isProviderId(lmstudioId) ||
-    !isProviderId(openaiId) ||
-    !isProviderId(anthropicId) ||
-    !isProviderId(openrouterId) ||
-    !isProviderId(deepseekId) ||
-    !isProviderId(geminiId)
-  ) {
-    return [];
+function currentTauriWindow(): Window | null {
+  if (!isTauriRuntime()) {
+    return null;
   }
-  return [
-    {
-      kind: "ollama",
-      id: ollamaId,
-      name: "Local Ollama",
-      baseUrl: "http://localhost:11434",
-      model: "qwen2.5:14b",
-    },
-    {
-      kind: "openai-compatible",
-      id: lmstudioId,
-      name: "Local LM Studio",
-      baseUrl: "http://localhost:1234/v1",
-      apiKeyRef: "",
-      model: "qwen2.5-14b-instruct",
-    },
-    {
-      kind: "openai-compatible",
-      id: openaiId,
-      name: "Cloud OpenAI",
-      baseUrl: "https://api.openai.com/v1",
-      apiKeyRef: "key:openai",
-      model: "gpt-4.1-mini",
-    },
-    {
-      kind: "anthropic",
-      id: anthropicId,
-      name: "Cloud Anthropic",
-      baseUrl: "https://api.anthropic.com",
-      apiKeyRef: "key:anthropic",
-      model: "claude-sonnet-4-5",
-    },
-    {
-      kind: "openai-compatible",
-      id: openrouterId,
-      name: "Cloud · OpenRouter (Claude Sonnet 4)",
-      baseUrl: "https://openrouter.ai/api/v1",
-      apiKeyRef: "openrouter",
-      model: "anthropic/claude-sonnet-4",
-    },
-    {
-      kind: "openai-compatible",
-      id: deepseekId,
-      name: "Cloud · DeepSeek (deepseek-chat)",
-      baseUrl: "https://api.deepseek.com/v1",
-      apiKeyRef: "deepseek",
-      model: "deepseek-chat",
-    },
-    {
-      kind: "openai-compatible",
-      id: geminiId,
-      name: "Cloud · Gemini (gemini-2.5-flash)",
-      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-      apiKeyRef: "gemini",
-      model: "gemini-2.5-flash",
-    },
-  ];
+  try {
+    return getCurrentWindow();
+  } catch {
+    return null;
+  }
 }
 
 function buildFallbackActions(): readonly CustomAction[] {
@@ -160,12 +95,12 @@ function renderCustomHtmlTemplate(
 export function App() {
   const [theme, setTheme] = useState<CardTheme>("dark-ink");
   const [sentence, setSentence] = useState("");
-  const [providers, setProviders] = useState<readonly ProviderConfig[]>(buildFallbackProviders);
+  const [providers, setProviders] = useState<readonly ProviderConfig[]>(buildDefaultProviders);
   const [configuredKeyRefs, setConfiguredKeyRefs] = useState<readonly string[]>([]);
   const [actions, setActions] = useState<readonly CustomAction[]>(buildFallbackActions);
   const [history, setHistory] = useState<readonly HistoryEntry[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<ProviderId | null>(
-    () => buildFallbackProviders()[0]?.id ?? null,
+    () => buildDefaultProviders()[0]?.id ?? null,
   );
   const [selectedActionId, setSelectedActionId] = useState<ActionId | null>(
     () => buildFallbackActions()[0]?.id ?? null,
@@ -210,6 +145,18 @@ export function App() {
   const { state, start, cancel, loadSnapshot } = useAnalysisStream({
     onCompleted: handleAnalysisCompleted,
   });
+
+  useEffect(() => {
+    document.documentElement.dataset.cardTheme = theme;
+    const appWindow = currentTauriWindow();
+    if (!appWindow) {
+      return;
+    }
+    const nativeTheme = theme === "dark-ink" ? "dark" : "light";
+    const backgroundColor = theme === "dark-ink" ? "#141519" : "#f3eee5";
+    void appWindow.setTheme(nativeTheme).catch(() => {});
+    void appWindow.setBackgroundColor(backgroundColor).catch(() => {});
+  }, [theme]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -428,7 +375,7 @@ export function App() {
             className="sentence-input"
             value={sentence}
             onChange={(e) => setSentence(e.target.value)}
-            placeholder="Enter an English sentence or press Alt+E / Cmd+Shift+E anywhere..."
+            placeholder="Paste an English sentence or select text in any app..."
             aria-label="English sentence to analyze"
           />
           {state.kind === "streaming" ? (
@@ -445,56 +392,6 @@ export function App() {
             </button>
           )}
         </form>
-
-        <div className="topbar-controls-row">
-          <select
-            className="topbar-select"
-            aria-label="Provider"
-            value={selectedProviderId ?? ""}
-            onChange={(e) => {
-              if (isProviderId(e.target.value)) {
-                setSelectedProviderId(e.target.value);
-              }
-            }}
-          >
-            {providers.map((provider) => (
-              <option key={provider.id} value={provider.id}>
-                {provider.name} ({provider.model})
-              </option>
-            ))}
-          </select>
-
-          <select
-            className="topbar-select"
-            aria-label="Action"
-            value={selectedActionId ?? ""}
-            onChange={(e) => {
-              if (isActionId(e.target.value)) {
-                setSelectedActionId(e.target.value);
-              }
-            }}
-          >
-            {actions.map((action) => (
-              <option key={action.id} value={action.id}>
-                {action.name}
-              </option>
-            ))}
-          </select>
-
-          <span className="topbar-spacer" />
-
-          <button
-            type="button"
-            className="app-btn"
-            onClick={() => setTheme((prev) => (prev === "dark-ink" ? "warm-paper" : "dark-ink"))}
-          >
-            {theme === "dark-ink" ? "Warm Paper" : "Dark Ink"}
-          </button>
-
-          <button type="button" className="app-btn" onClick={() => setDrawerOpen(true)}>
-            Settings
-          </button>
-        </div>
       </header>
 
       <main className="app-stage">
@@ -505,8 +402,8 @@ export function App() {
                 <strong>[{captureError.hotkey}]</strong> {captureError.message}
               </div>
               <div className="capture-error-hint">
-                macOS 权限路径：<code>系统设置 → 隐私与安全性 → 辅助功能</code>（授权后可使用{" "}
-                <kbd>Alt+E</kbd> 或 <kbd>Cmd+Shift+E</kbd> 全局取词，也可点击右侧按钮直接分析剪贴板或手动粘贴）。
+                macOS 权限路径：<code>系统设置 → 隐私与安全性 → 辅助功能</code>（授权后可使用鼠标划词浮窗或{" "}
+                <kbd>Alt+E</kbd> / <kbd>Cmd+Shift+E</kbd> 取词，也可直接分析剪贴板）。
               </div>
             </div>
             <div className="capture-error-actions">
@@ -531,8 +428,8 @@ export function App() {
         {state.kind === "idle" ? (
           <section className="stage-panel empty-state">
             <p>
-              Select an English sentence in any desktop app and press <kbd>Alt+E</kbd> or{" "}
-              <kbd>Cmd+Shift+E</kbd>, or type a sentence above to stream its syntactic analysis.
+              Select an English sentence in any app and click <strong>句型分析</strong>, press{" "}
+              <kbd>Alt+E</kbd> / <kbd>Cmd+Shift+E</kbd>, or enter a sentence above.
             </p>
             <div className="empty-state-actions">
               <button
@@ -549,8 +446,14 @@ export function App() {
         {state.kind === "streaming" ? (
           <section className="stage-panel" aria-live="polite">
             <div className="stream-status">
-              <span>Streaming analysis...</span>
-              <span>{state.streamedText.length} chars</span>
+              <span>
+                {state.streamedText.length === 0
+                  ? "Waiting for model response..."
+                  : "Streaming analysis..."}
+              </span>
+              {state.streamedText.length > 0 ? (
+                <span>{state.streamedText.length} chars</span>
+              ) : null}
             </div>
             {state.hits.length > 0 ? (
               <div className="stream-hits">
@@ -615,6 +518,46 @@ export function App() {
             })()
           : null}
       </main>
+
+      <footer className="app-footer-bar">
+        <ModelPicker
+          providers={providers}
+          selectedProviderId={selectedProviderId}
+          configuredKeyRefs={configuredKeyRefs}
+          onSelectProvider={setSelectedProviderId}
+        />
+
+        <select
+          className="topbar-select"
+          aria-label="Action"
+          value={selectedActionId ?? ""}
+          onChange={(e) => {
+            if (isActionId(e.target.value)) {
+              setSelectedActionId(e.target.value);
+            }
+          }}
+        >
+          {actions.map((action) => (
+            <option key={action.id} value={action.id}>
+              {action.name}
+            </option>
+          ))}
+        </select>
+
+        <span className="footer-spacer" />
+
+        <button
+          type="button"
+          className="app-btn"
+          onClick={() => setTheme((prev) => (prev === "dark-ink" ? "warm-paper" : "dark-ink"))}
+        >
+          {theme === "dark-ink" ? "Warm Paper" : "Dark Ink"}
+        </button>
+
+        <button type="button" className="app-btn" onClick={() => setDrawerOpen(true)}>
+          Settings
+        </button>
+      </footer>
 
       <SettingsDrawer
         isOpen={drawerOpen}

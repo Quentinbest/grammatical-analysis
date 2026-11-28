@@ -12,9 +12,30 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Grammatical Analysis",
-        "width": 560,
-        "height": 420
+        "width": 580,
+        "height": 480,
+        "minWidth": 420,
+        "minHeight": 340,
+        "theme": "Dark",
+        "titleBarStyle": "Transparent",
+        "backgroundColor": "#141519"
+      },
+      {
+        "label": "selection-pill",
+        "title": "Grammatical Analysis Selection",
+        "url": "index.html?view=selection-pill",
+        "width": 148,
+        "height": 42,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "shadow": false
       }
     ],
     "security": {

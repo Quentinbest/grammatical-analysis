@@ -12,17 +12,26 @@ Return ONLY a single JSON object matching `StructuredGrammarCard` (no markdown f
   "sourceText": "<exact original input>",
   "meaning": "<natural Simplified Chinese whole-sentence meaning>",
   "parts": [
-    { "kind": "token", "id": "t1", "text": "...", "role": "subj|pred|obj|mod", "subLabel": "...", "star": false, "antecedentIndex": 1, "note": "..." },
-    { "kind": "clause", "id": "c1", "badge": "...", "connector": "...", "omittedHint": "...", "star": false, "items": [
-        { "kind": "sub-token", "id": "st1", "text": "...", "role": "subj|pred|obj|mod", "note": "..." },
-        { "kind": "gap", "id": "g1", "index": 1, "note": "..." }
+    { "kind": "token", "id": "t1", "text": "...", "role": "subj|pred|obj|comp|mod", "subLabel": "...", "star": false, "antecedentIndex": 1, "note": "..." },
+    { "kind": "connector", "id": "cn1", "text": "and", "badge": "并列连词", "note": "..." },
+    { "kind": "clause", "id": "c1", "badge": "宾语从句", "connector": "...", "omittedHint": "(that)", "star": false, "items": [
+      { "kind": "sub-token", "id": "st1", "text": "...", "role": "subj|pred|obj|comp|mod", "antecedentIndex": 1, "note": "..." },
+      { "kind": "gap", "id": "g1", "index": 1, "note": "..." },
+      { "kind": "clause", "id": "c2", "badge": "定语从句", "connector": "who", "items": [
+        { "kind": "sub-token", "id": "st2", "text": "...", "role": "pred", "note": "..." }
+      ]}
     ]},
     { "kind": "punct", "text": "." }
   ],
   "recombination": "<how the blocks recombine into the full meaning>",
   "caveatNote": "<relevant caveat from book-caveats.md or null>",
   "bookRef": { "chapter": "chXX", "section": "...", "passageId": "chXX-bYYYY" }
-}"#;
+}
+Rules:
+1. Never wrap a main clause (`主句` like `I don't think`) in `"clause"`; keep main `subj`/`pred`/`obj`/`comp`/`mod` (`comp` = complement like `is [the only lab]`) as top-level `"token"`, coordinate `and`/`but` as top-level `"connector"`, and wrap ONLY subordinate clauses (`宾语从句`/`定语从句`/`状语从句`, up to 2 nested levels) in `"clause"`.
+2. Segment every clause into internal `subj`, `pred`, `obj`, `comp`, `mod`, `gap`, and nested `clause` items; never leave a multi-word clause as one token.
+3. Mark negation/tense/transferred-negation with `subLabel` (`"否定"`/`"否定转移"`) and `omittedHint` (`"(that)"` when subordinating `that` is omitted, distinct from demonstrative subject `that` in `that'd be`).
+4. Keep JSON compact for fast streaming: keep every "note" concise (1 short phrase <= 16 Chinese chars; never omit "note"), omit optional fields when false or null ("star", "subLabel", "antecedentIndex", "omittedHint", "caveatNote"), and keep "recombination" to 2-3 concise sentences."#;
 
 #[derive(Debug)]
 pub enum PromptError {
@@ -130,12 +139,6 @@ impl PromptBuilder {
         );
 
         let max_total_chars = self.config.max_total_chars;
-
-        // Priority order for budget allocation:
-        // 1. Mandatory core: book-caveats.md + OUTPUT_SCHEMA_BLOCK
-        // 2. user_prompt (truncating source_text on a char boundary if needed)
-        // 3. Retrieved textbook hits (only complete hits; never a dangling heading)
-        // 4. Optional guidance: SKILL.md, workflows.md, teaching-method.md
         let mut system_parts: Vec<String> = Vec::with_capacity(6);
         let mut used_system_chars = 0usize;
         let mut truncated = false;
@@ -159,11 +162,9 @@ impl PromptBuilder {
             }
         };
 
-        // 1. Reserve budget for mandatory core first so long source_text can never starve it.
         push_mandatory(&caveats_section);
         push_mandatory(&schema_section);
 
-        // 2. Allocate remaining budget to user_prompt.
         let full_user_prompt = format!("{USER_PROMPT_PREFIX}{}", source_text.trim());
         let remaining_for_user = max_total_chars.saturating_sub(used_system_chars);
         let user_prompt = if full_user_prompt.chars().count() <= remaining_for_user {
@@ -175,7 +176,6 @@ impl PromptBuilder {
         let user_chars = user_prompt.chars().count();
         let budget_for_system = max_total_chars.saturating_sub(user_chars);
 
-        // 3. Allocate remaining budget to complete textbook hits.
         let mut included_hits = 0usize;
         if !hits.is_empty() {
             let sep = if system_parts.is_empty() { 0 } else { 2 };
@@ -204,7 +204,6 @@ impl PromptBuilder {
             }
         }
 
-        // 4. Allocate remaining budget to optional guidance.
         for optional_block in [skill_section, workflows_section, teaching_section] {
             let sep = if system_parts.is_empty() { 0 } else { 2 };
             let remaining = budget_for_system
@@ -370,7 +369,7 @@ mod tests {
     #[test]
     fn long_source_text_preserves_mandatory_core_and_respects_char_cap() {
         let sources = PromptSources::load_from_dir(&workspace_prompts_dir()).expect("load prompts");
-        let cap = 5_000;
+        let cap = 5_500;
         let builder = PromptBuilder::new(
             sources.clone(),
             PromptConfig {
@@ -401,8 +400,6 @@ mod tests {
 
     #[test]
     fn tiny_cap_truncating_caveats_reports_included_caveats_false() {
-        // 500 chars is large enough to include the first heading of book-caveats.md
-        // ("教材解释与实际用法的边界"), yet far smaller than the complete caveats file.
         let tiny_cap = 500;
         let builder = PromptBuilder::from_dir(
             &workspace_prompts_dir(),
@@ -485,8 +482,6 @@ mod tests {
             },
         ];
         let source_text = "Short input.";
-
-        // Compute exact base size of mandatory core + user_prompt.
         let base = PromptBuilder::new(
             sources.clone(),
             PromptConfig {
@@ -495,14 +490,14 @@ mod tests {
             },
         )
         .build(source_text, &[]);
+        let empty_optional_separators = 3 * "\n\n".len();
         let base_chars = base.system_prompt.chars().count()
             - "## Core Instructions (SKILL.md)\n".chars().count()
             - "## Task Workflows (workflows.md)\n".chars().count()
             - "## Teaching Method (teaching-method.md)\n".chars().count()
-            - 6 // three "\n\n" separators for the three empty optional sections
+            - empty_optional_separators
             + base.user_prompt.chars().count();
 
-        // Case A: enough room for the hits heading alone, but NOT for heading + 1st complete hit.
         let cap_zero_hits = base_chars + 2 + HITS_HEADING.chars().count() + 10;
         let zero_fit = PromptBuilder::new(
             sources.clone(),
@@ -521,7 +516,6 @@ mod tests {
         assert!(zero_fit.truncated);
         assert!(zero_fit.total_chars <= cap_zero_hits);
 
-        // Case B: enough room for heading + 1st complete hit, but NOT 2nd hit.
         let hit1_line = format_hit_line(&hits[0], 200);
         let cap_one_hit = base_chars + 2 + HITS_HEADING.chars().count() + hit1_line.chars().count();
         let one_fit = PromptBuilder::new(
@@ -539,5 +533,25 @@ mod tests {
         assert!(!one_fit.system_prompt.contains("ch09-b0042"));
         assert!(one_fit.truncated);
         assert!(one_fit.total_chars <= cap_one_hit);
+    }
+
+    #[test]
+    fn output_schema_includes_compact_json_streaming_rule() {
+        let builder = PromptBuilder::from_dir(&workspace_prompts_dir(), PromptConfig::default())
+            .expect("load prompts");
+        let assembled = builder.build("The book Maya recommended won a prize.", &sample_hits());
+
+        assert!(assembled
+            .system_prompt
+            .contains("4. Keep JSON compact for fast streaming:"));
+        assert!(assembled
+            .system_prompt
+            .contains("1 short phrase <= 16 Chinese chars; never omit \"note\""));
+        assert!(assembled
+            .system_prompt
+            .contains("omit optional fields when false or null"));
+        assert!(assembled
+            .system_prompt
+            .contains("keep \"recombination\" to 2-3 concise sentences"));
     }
 }
