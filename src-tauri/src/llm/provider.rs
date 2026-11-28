@@ -58,6 +58,7 @@ pub struct AnalysisPromptRequest {
     pub user_prompt: String,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    pub reasoning_effort: Option<String>,
     pub timeout: Duration,
     pub cancel: CancellationToken,
 }
@@ -69,6 +70,7 @@ impl AnalysisPromptRequest {
             user_prompt: user_prompt.into(),
             temperature: Some(0.2),
             max_tokens: None,
+            reasoning_effort: None,
             timeout: Duration::from_secs(60),
             cancel: CancellationToken::new(),
         }
@@ -156,6 +158,14 @@ pub fn create_provider(
     api_key: Option<String>,
 ) -> Result<ProviderClient, ProviderError> {
     let client = build_http_client()?;
+    create_provider_with_client(client, config, api_key)
+}
+
+pub fn create_provider_with_client(
+    client: reqwest::Client,
+    config: &ProviderConfig,
+    api_key: Option<String>,
+) -> Result<ProviderClient, ProviderError> {
     let normalized_key = api_key.and_then(|k| {
         let trimmed = k.trim();
         if trimmed.is_empty() {
@@ -192,9 +202,11 @@ pub fn create_provider(
     }
 }
 
-pub(crate) fn build_http_client() -> Result<reqwest::Client, ProviderError> {
+pub fn build_http_client() -> Result<reqwest::Client, ProviderError> {
     reqwest::Client::builder()
         .no_proxy()
+        .tcp_nodelay(true)
+        .pool_idle_timeout(Duration::from_secs(90))
         .build()
         .map_err(|err| ProviderError::Network {
             message: format!("failed to build HTTP client: {err}"),
@@ -283,21 +295,26 @@ pub(crate) fn emit_and_return_err(
     Err(err)
 }
 
-/// Sends a prepared HTTP request and drives its response byte stream with unified
-/// timeout and cooperative cancellation semantics.
-///
-/// `on_chunk` receives `Some(bytes)` for each network chunk (returning `Ok(true)` to
-/// stop early once a terminal sentinel is seen) and `None` once at EOF to flush any
-/// buffered parser state.
+pub(crate) enum StreamFrame<'a> {
+    Chunk(&'a [u8]),
+    Eof,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamControl {
+    Continue,
+    Done,
+}
+
 pub(crate) async fn send_and_stream<FChunk>(
     request_builder: reqwest::RequestBuilder,
     timeout: Duration,
     cancel: &CancellationToken,
     on_event: &(impl Fn(AnalysisStreamEvent) + Send + Sync),
-    mut on_chunk: FChunk,
+    mut on_frame: FChunk,
 ) -> Result<(), ProviderError>
 where
-    FChunk: FnMut(Option<&[u8]>) -> Result<bool, ProviderError>,
+    FChunk: FnMut(StreamFrame<'_>) -> Result<StreamControl, ProviderError>,
 {
     if cancel.is_cancelled() {
         return emit_and_return_err(ProviderError::Cancelled, on_event);
@@ -373,8 +390,8 @@ where
 
         match next_item {
             Some(Ok(bytes)) => {
-                let finished = match on_chunk(Some(&bytes)) {
-                    Ok(finished) => finished,
+                let step = match on_frame(StreamFrame::Chunk(&bytes)) {
+                    Ok(step) => step,
                     Err(err) => {
                         if cancel.is_cancelled() {
                             return emit_and_return_err(ProviderError::Cancelled, on_event);
@@ -385,7 +402,7 @@ where
                 if cancel.is_cancelled() {
                     return emit_and_return_err(ProviderError::Cancelled, on_event);
                 }
-                if finished {
+                if step == StreamControl::Done {
                     saw_terminal = true;
                     break;
                 }
@@ -405,8 +422,8 @@ where
     }
 
     if !saw_terminal {
-        let finished = match on_chunk(None) {
-            Ok(finished) => finished,
+        let step = match on_frame(StreamFrame::Eof) {
+            Ok(step) => step,
             Err(err) => {
                 if cancel.is_cancelled() {
                     return emit_and_return_err(ProviderError::Cancelled, on_event);
@@ -417,7 +434,7 @@ where
         if cancel.is_cancelled() {
             return emit_and_return_err(ProviderError::Cancelled, on_event);
         }
-        saw_terminal = finished;
+        saw_terminal = step == StreamControl::Done;
     }
 
     if cancel.is_cancelled() {

@@ -7,6 +7,7 @@ use crate::domain::types::AnalysisStreamEvent;
 
 use super::provider::{
     join_endpoint, send_and_stream, AnalysisPromptRequest, LlmProvider, ProviderError,
+    StreamControl, StreamFrame,
 };
 use super::sse::SseParser;
 
@@ -33,10 +34,37 @@ impl OpenAiCompatProvider {
             api_key,
         }
     }
+
+    pub(crate) fn build_request_body<'a>(
+        &'a self,
+        request: &'a AnalysisPromptRequest,
+    ) -> ChatCompletionsRequest<'a> {
+        ChatCompletionsRequest {
+            model: &self.model,
+            stream: true,
+            messages: [
+                ChatMessage {
+                    role: "system",
+                    content: &request.system_prompt,
+                },
+                ChatMessage {
+                    role: "user",
+                    content: &request.user_prompt,
+                },
+            ],
+            temperature: request.temperature,
+            max_tokens: request.max_tokens,
+            reasoning_effort: resolve_reasoning_effort(
+                &self.base_url,
+                &self.model,
+                request.reasoning_effort.as_deref(),
+            ),
+        }
+    }
 }
 
 #[derive(Serialize)]
-struct ChatCompletionsRequest<'a> {
+pub(crate) struct ChatCompletionsRequest<'a> {
     model: &'a str,
     stream: bool,
     messages: [ChatMessage<'a>; 2],
@@ -44,6 +72,31 @@ struct ChatCompletionsRequest<'a> {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
+}
+
+pub(crate) fn resolve_reasoning_effort<'a>(
+    base_url: &str,
+    model: &str,
+    explicit: Option<&'a str>,
+) -> Option<&'a str> {
+    if let Some(trimmed) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(trimmed);
+    }
+    let is_gemini_host = reqwest::Url::parse(base_url.trim())
+        .ok()
+        .and_then(|url| {
+            url.host_str()
+                .map(|host| host.eq_ignore_ascii_case("generativelanguage.googleapis.com"))
+        })
+        .unwrap_or(false);
+    let is_gemini_model = model.trim().to_ascii_lowercase().starts_with("gemini-");
+    if is_gemini_host || is_gemini_model {
+        Some("low")
+    } else {
+        None
+    }
 }
 
 #[derive(Serialize)]
@@ -198,23 +251,7 @@ impl LlmProvider for OpenAiCompatProvider {
         async move {
             let started = Instant::now();
             let url = join_endpoint(&self.base_url, "chat/completions");
-
-            let body = ChatCompletionsRequest {
-                model: &self.model,
-                stream: true,
-                messages: [
-                    ChatMessage {
-                        role: "system",
-                        content: &request.system_prompt,
-                    },
-                    ChatMessage {
-                        role: "user",
-                        content: &request.user_prompt,
-                    },
-                ],
-                temperature: request.temperature,
-                max_tokens: request.max_tokens,
-            };
+            let body = self.build_request_body(&request);
 
             let mut req_builder = self
                 .client
@@ -282,9 +319,9 @@ impl LlmProvider for OpenAiCompatProvider {
                 request.timeout,
                 &request.cancel,
                 &on_event,
-                |maybe_bytes| {
-                    match maybe_bytes {
-                        Some(bytes) => parser.feed(bytes, |ev| {
+                |frame| {
+                    match frame {
+                        StreamFrame::Chunk(bytes) => parser.feed(bytes, |ev| {
                             handle_event(
                                 ev.event,
                                 ev.data,
@@ -293,7 +330,7 @@ impl LlmProvider for OpenAiCompatProvider {
                                 &mut parse_error,
                             );
                         }),
-                        None => parser.finish(|ev| {
+                        StreamFrame::Eof => parser.finish(|ev| {
                             handle_event(
                                 ev.event,
                                 ev.data,
@@ -306,7 +343,11 @@ impl LlmProvider for OpenAiCompatProvider {
                     if let Some(err) = parse_error.take() {
                         return Err(err);
                     }
-                    Ok(done)
+                    Ok(if done {
+                        StreamControl::Done
+                    } else {
+                        StreamControl::Continue
+                    })
                 },
             )
             .await?;
@@ -317,5 +358,93 @@ impl LlmProvider for OpenAiCompatProvider {
             });
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::provider::build_http_client;
+
+    #[test]
+    fn resolve_reasoning_effort_targets_gemini_only_unless_explicitly_overridden() {
+        assert_eq!(
+            resolve_reasoning_effort("https://api.openai.com/v1", "gemini-4-hydrogen", None),
+            Some("low")
+        );
+        assert_eq!(
+            resolve_reasoning_effort("https://api.openai.com/v1", "gemini-3.8-flash", None),
+            Some("low")
+        );
+        assert_eq!(
+            resolve_reasoning_effort("https://api.openai.com/v1", "gemini-4-carbon", None),
+            Some("low")
+        );
+        assert_eq!(
+            resolve_reasoning_effort("https://api.openai.com/v1", " Gemini-2.5-Flash ", None),
+            Some("low")
+        );
+        assert_eq!(
+            resolve_reasoning_effort(
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                "custom-alias",
+                None,
+            ),
+            Some("low")
+        );
+        assert_eq!(
+            resolve_reasoning_effort(
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                "gemini-4-hydrogen",
+                Some("  high "),
+            ),
+            Some("high")
+        );
+        assert_eq!(
+            resolve_reasoning_effort(
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                "gemini-4-hydrogen",
+                Some("   "),
+            ),
+            Some("low")
+        );
+        assert_eq!(
+            resolve_reasoning_effort("https://api.openai.com/v1", "gpt-6.2-sol", None),
+            None
+        );
+        assert_eq!(
+            resolve_reasoning_effort(
+                "https://api.deepseek.com/v1",
+                "deepseek-v4.1-flash-1017",
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_reasoning_effort(
+                "https://openrouter.ai/api/v1",
+                "anthropic/claude-sonnet-5.5",
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_reasoning_effort("http://127.0.0.1:1234/v1", "qwen2.5-14b-instruct", None),
+            None
+        );
+
+        let provider = OpenAiCompatProvider::new(
+            build_http_client().expect("http client"),
+            "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+            "gemini-4-hydrogen".into(),
+            Some("test-key".into()),
+        );
+        let req = AnalysisPromptRequest::new("sys", "usr");
+        let serialized = serde_json::to_value(provider.build_request_body(&req)).expect("json");
+        assert_eq!(
+            serialized.get("reasoning_effort").and_then(|v| v.as_str()),
+            Some("low")
+        );
+        assert!(serialized.get("max_tokens").is_none());
     }
 }

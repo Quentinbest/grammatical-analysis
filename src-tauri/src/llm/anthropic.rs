@@ -7,7 +7,7 @@ use crate::domain::types::AnalysisStreamEvent;
 
 use super::provider::{
     has_path_suffix, send_and_stream, split_url_tail, AnalysisPromptRequest, LlmProvider,
-    ProviderError,
+    ProviderError, StreamControl, StreamFrame,
 };
 use super::sse::SseParser;
 
@@ -212,9 +212,9 @@ impl LlmProvider for AnthropicProvider {
                 request.timeout,
                 &request.cancel,
                 &on_event,
-                |maybe_bytes| {
-                    match maybe_bytes {
-                        Some(bytes) => parser.feed(bytes, |ev| {
+                |frame| {
+                    match frame {
+                        StreamFrame::Chunk(bytes) => parser.feed(bytes, |ev| {
                             handle_event(
                                 ev.event,
                                 ev.data,
@@ -223,7 +223,7 @@ impl LlmProvider for AnthropicProvider {
                                 &mut parse_error,
                             );
                         }),
-                        None => parser.finish(|ev| {
+                        StreamFrame::Eof => parser.finish(|ev| {
                             handle_event(
                                 ev.event,
                                 ev.data,
@@ -236,7 +236,11 @@ impl LlmProvider for AnthropicProvider {
                     if let Some(err) = parse_error.take() {
                         return Err(err);
                     }
-                    Ok(done)
+                    Ok(if done {
+                        StreamControl::Done
+                    } else {
+                        StreamControl::Continue
+                    })
                 },
             )
             .await?;
