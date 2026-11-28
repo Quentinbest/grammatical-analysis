@@ -368,7 +368,8 @@ describe("UnifiedCard", () => {
     expect(container.querySelector(".usage-note-strip")?.textContent).toContain("否定转移");
     expect(container.querySelector(".caveat-strip")).toBeNull();
 
-    // Selecting nested token then folding outer clause clears inspector selection
+    // Selecting nested token then folding outer clause clears inspector selection,
+    // updates fold-all to "展开全部从句", and clears .has-trace when no gaps remain visible
     act(() => {
       container.querySelector<HTMLElement>('[data-tok-id="st4"]')?.click();
     });
@@ -378,6 +379,15 @@ describe("UnifiedCard", () => {
       container.querySelector<HTMLButtonElement>('[data-fold-clause="c1"]')?.click();
     });
     expect(container.querySelector(".inspector-head")?.textContent).toContain("结构要点");
+    const foldAllBtn = container.querySelector<HTMLButtonElement>('[data-action="fold-all"]');
+    expect(foldAllBtn?.textContent).toBe("展开全部从句");
+    expect(container.querySelector(".sent-wrap")?.classList.contains("has-trace")).toBe(false);
+
+    act(() => {
+      foldAllBtn?.click();
+    });
+    expect(foldAllBtn?.textContent).toBe("折叠修饰看主干");
+    expect(container.querySelector(".sent-wrap")?.classList.contains("has-trace")).toBe(true);
 
     // [断句] toggle adds data-linebreak="true" and renders .sent-linebreak <br> elements
     const lineBreakBtn = container.querySelector<HTMLButtonElement>('[data-action="toggle-linebreak"]');
@@ -389,5 +399,43 @@ describe("UnifiedCard", () => {
     });
     expect(container.querySelector(".sent-body")?.getAttribute("data-linebreak")).toBe("true");
     expect(container.querySelectorAll(".sent-linebreak").length).toBe(2);
+  });
+
+  it("inserts a line break after a leading subordinate clause when [断句] is toggled", () => {
+    const leadingClauseCard = parseGrammarCard(
+      {
+        meaning: "走回家时，雨开始下了。",
+        parts: [
+          {
+            kind: "clause",
+            id: "c1",
+            badge: "状语从句",
+            connector: "While",
+            items: [{ kind: "sub-token", id: "st1", text: "walking home", role: "pred", note: "时间状语。" }],
+          },
+          { kind: "punct", text: "," },
+          { kind: "token", id: "t1", text: "the rain", role: "subj", note: "主语。" },
+          { kind: "token", id: "t2", text: "started", role: "pred", note: "谓语。" },
+          { kind: "punct", text: "." },
+        ],
+        recombination: "先交代时间背景，再引出主句动作。",
+        caveatNote: null,
+        bookRef: null,
+      },
+      "While walking home, the rain started.",
+    );
+
+    act(() => {
+      root.render(createElement(UnifiedCard, { card: leadingClauseCard, theme: "dark-ink" }));
+    });
+
+    const lineBreakBtn = container.querySelector<HTMLButtonElement>('[data-action="toggle-linebreak"]');
+    expect(lineBreakBtn).not.toBeNull();
+    expect(container.querySelectorAll(".sent-linebreak").length).toBe(0);
+
+    act(() => {
+      lineBreakBtn?.click();
+    });
+    expect(container.querySelectorAll(".sent-linebreak").length).toBe(1);
   });
 });

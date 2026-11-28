@@ -101,40 +101,90 @@ impl Storage {
             )?;
         }
 
-        const LEGACY_PROVIDER_UPGRADES: &[(&str, &str, &str, &str)] = &[
-            ("prov-openai", "OpenAI · GPT-6.2 Sol", "gpt-6.2-sol", "gpt-4.1-mini"),
+        const LEGACY_PROVIDER_UPGRADES: &[(&str, &str, &str, &str, &str, &str, &str, &str)] = &[
+            (
+                "prov-openai",
+                "OpenAI · GPT-6.2 Sol",
+                "gpt-6.2-sol",
+                "openai-compatible",
+                "Cloud OpenAI",
+                "https://api.openai.com/v1",
+                "key:openai",
+                "gpt-4.1-mini",
+            ),
             (
                 "prov-anthropic",
                 "Anthropic · Claude Sonnet 5.5",
                 "claude-sonnet-5-5",
+                "anthropic",
+                "Cloud Anthropic",
+                "https://api.anthropic.com",
+                "key:anthropic",
                 "claude-sonnet-4-5",
             ),
             (
                 "provider-openrouter",
                 "OpenRouter · Claude Sonnet 5.5",
                 "anthropic/claude-sonnet-5.5",
+                "openai-compatible",
+                "Cloud · OpenRouter (Claude Sonnet 4)",
+                "https://openrouter.ai/api/v1",
+                "openrouter",
                 "anthropic/claude-sonnet-4",
             ),
             (
                 "provider-deepseek",
                 "DeepSeek · DeepSeek V4.1 Flash",
                 "deepseek-v4.1-flash-1017",
+                "openai-compatible",
+                "Cloud · DeepSeek (deepseek-chat)",
+                "https://api.deepseek.com/v1",
+                "deepseek",
                 "deepseek-chat",
             ),
             (
                 "provider-gemini",
                 "Google · Gemini 3.8 Flash",
                 "gemini-3.8-flash",
+                "openai-compatible",
+                "Cloud · Gemini (gemini-2.5-flash)",
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                "gemini",
                 "gemini-2.5-flash",
             ),
         ];
 
-        for &(id, new_name, new_model, legacy_model) in LEGACY_PROVIDER_UPGRADES {
+        for &(
+            id,
+            new_name,
+            new_model,
+            legacy_kind,
+            legacy_name,
+            legacy_base_url,
+            legacy_api_key_ref,
+            legacy_model,
+        ) in LEGACY_PROVIDER_UPGRADES
+        {
             conn.execute(
                 "UPDATE providers
-                 SET name = ?2, model = ?3, updated_at = ?5
-                 WHERE id = ?1 AND model = ?4",
-                params![id, new_name, new_model, legacy_model, now],
+                 SET name = ?2, model = ?3, updated_at = ?9
+                 WHERE id = ?1
+                   AND kind = ?4
+                   AND name = ?5
+                   AND base_url = ?6
+                   AND api_key_ref = ?7
+                   AND model = ?8",
+                params![
+                    id,
+                    new_name,
+                    new_model,
+                    legacy_kind,
+                    legacy_name,
+                    legacy_base_url,
+                    legacy_api_key_ref,
+                    legacy_model,
+                    now
+                ],
             )?;
         }
 
@@ -753,6 +803,24 @@ mod tests {
                 model: "my-custom-claude-endpoint".into(),
             })
             .expect("insert custom anthropic");
+        storage
+            .upsert_provider(&ProviderConfig::OpenaiCompatible {
+                id: "provider-deepseek".into(),
+                name: "Corp DeepSeek Proxy".into(),
+                base_url: "https://proxy.corp.internal/v1".into(),
+                api_key_ref: "key:corp-deepseek".into(),
+                model: "deepseek-chat".into(),
+            })
+            .expect("insert customized deepseek with legacy model");
+        storage
+            .upsert_provider(&ProviderConfig::OpenaiCompatible {
+                id: "provider-gemini".into(),
+                name: "Google · Gemini 3.8 Flash".into(),
+                base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+                api_key_ref: "gemini".into(),
+                model: "gemini-2.5-flash".into(),
+            })
+            .expect("insert user-pinned legacy gemini model");
 
         storage.seed_defaults().expect("re-run seed_defaults");
 
@@ -774,6 +842,30 @@ mod tests {
                 base_url: "https://api.anthropic.com".into(),
                 api_key_ref: "key:anthropic".into(),
                 model: "my-custom-claude-endpoint".into(),
+            })
+        );
+        assert_eq!(
+            storage
+                .get_provider("provider-deepseek")
+                .expect("get customized deepseek"),
+            Some(ProviderConfig::OpenaiCompatible {
+                id: "provider-deepseek".into(),
+                name: "Corp DeepSeek Proxy".into(),
+                base_url: "https://proxy.corp.internal/v1".into(),
+                api_key_ref: "key:corp-deepseek".into(),
+                model: "deepseek-chat".into(),
+            })
+        );
+        assert_eq!(
+            storage
+                .get_provider("provider-gemini")
+                .expect("get pinned gemini"),
+            Some(ProviderConfig::OpenaiCompatible {
+                id: "provider-gemini".into(),
+                name: "Google · Gemini 3.8 Flash".into(),
+                base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+                api_key_ref: "gemini".into(),
+                model: "gemini-2.5-flash".into(),
             })
         );
     }

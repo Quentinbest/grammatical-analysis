@@ -8,8 +8,10 @@ import {
   hasGapSlots,
   hasLineBreakTargets,
   hasOmittedHints,
+  hasVisibleGapSlots,
   isTokenVisible,
   setAllClausesFolded,
+  shouldBreakBeforePart,
   shouldDrawGapArc,
   toggleClauseFold,
 } from "../../domain/cardViewModel.ts";
@@ -214,7 +216,7 @@ function StructuredCardView({
   const gapsPresent = hasGapSlots(card);
   const omittedPresent = hasOmittedHints(card);
   const foldedNow = areAllClausesFolded(card, foldedClauses);
-  const traceVisible = gapsPresent && showGapLayer && !foldedNow;
+  const traceVisible = hasVisibleGapSlots(card, foldedClauses) && showGapLayer;
   const activeNote = findTokenNote(card, selectedId);
 
   const recomputeTraces = useCallback(() => {
@@ -541,12 +543,7 @@ function StructuredCardView({
         <div className="sent-body" data-linebreak={lineBreakMode ? "true" : undefined}>
           {card.parts.map((part, idx) => {
             const leadingSpace = idx > 0 && part.kind !== "punct" ? " " : null;
-            const prevPart = idx > 0 ? card.parts[idx - 1] : undefined;
-            const shouldLineBreak =
-              lineBreakMode &&
-              idx > 0 &&
-              (part.kind === "connector" ||
-                (part.kind === "clause" && prevPart?.kind !== "connector"));
+            const shouldLineBreak = lineBreakMode && shouldBreakBeforePart(card.parts, idx);
 
             switch (part.kind) {
               case "punct":
@@ -555,6 +552,7 @@ function StructuredCardView({
                 return (
                   <Fragment key={part.id}>
                     {leadingSpace}
+                    {shouldLineBreak ? <br className="sent-linebreak" /> : null}
                     {renderWordToken(part)}
                   </Fragment>
                 );

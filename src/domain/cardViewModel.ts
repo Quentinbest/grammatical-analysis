@@ -2,6 +2,7 @@ import type {
   ClauseGroup,
   ClauseId,
   GapIndex,
+  SentencePart,
   StructuredGrammarCard,
   TokenId,
 } from "./types.ts";
@@ -59,29 +60,75 @@ export function hasFoldableClauses(card: StructuredGrammarCard): boolean {
   return card.parts.some((part) => part.kind === "clause");
 }
 
+export function shouldBreakBeforePart(
+  parts: readonly SentencePart[],
+  idx: number,
+): boolean {
+  if (idx <= 0 || idx >= parts.length) {
+    return false;
+  }
+  const part = parts[idx];
+  const prevPart = parts[idx - 1];
+  if (!part || !prevPart || part.kind === "punct") {
+    return false;
+  }
+  if (part.kind === "connector") {
+    return true;
+  }
+  if (part.kind === "clause") {
+    return prevPart.kind !== "connector";
+  }
+  if (prevPart.kind === "clause") {
+    return true;
+  }
+  return prevPart.kind === "punct" && idx >= 2 && parts[idx - 2]?.kind === "clause";
+}
+
 export function hasLineBreakTargets(card: StructuredGrammarCard): boolean {
-  return card.parts.some((part) => part.kind === "clause" || part.kind === "connector");
+  return card.parts.some((_, idx) => shouldBreakBeforePart(card.parts, idx));
 }
 
 export function areAllClausesFolded(
   card: StructuredGrammarCard,
   folded: FoldedClauses,
 ): boolean {
-  const allIds = new Set<ClauseId>();
+  let topLevelCount = 0;
   for (const part of card.parts) {
     if (part.kind === "clause") {
-      collectClauseIds(part, allIds);
+      topLevelCount += 1;
+      if (!folded.has(part.id)) {
+        return false;
+      }
     }
   }
-  if (allIds.size === 0) {
+  return topLevelCount > 0;
+}
+
+function clauseHasVisibleGapSlots(clause: ClauseGroup, folded: FoldedClauses): boolean {
+  if (folded.has(clause.id)) {
     return false;
   }
-  for (const id of allIds) {
-    if (!folded.has(id)) {
-      return false;
+  for (const item of clause.items) {
+    if (item.kind === "gap") {
+      return true;
+    }
+    if (item.kind === "clause" && clauseHasVisibleGapSlots(item, folded)) {
+      return true;
     }
   }
-  return true;
+  return false;
+}
+
+export function hasVisibleGapSlots(
+  card: StructuredGrammarCard,
+  folded: FoldedClauses,
+): boolean {
+  for (const part of card.parts) {
+    if (part.kind === "clause" && clauseHasVisibleGapSlots(part, folded)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function clauseHasGapSlots(clause: ClauseGroup): boolean {

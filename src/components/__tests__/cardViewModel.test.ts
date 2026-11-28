@@ -171,6 +171,7 @@ describe("cardViewModel", () => {
 
     // Folding ONLY outer clause hides inner tokens and inner gaps even if inner clause is not in folded set
     const foldOuterOnly = toggleClauseFold(createEmptyFoldState(), toClauseId("c-outer"));
+    expect(areAllClausesFolded(parsed, foldOuterOnly)).toBe(true);
     expect(isTokenVisible(parsed, toTokenId("st-inner"), foldOuterOnly, true)).toBe(false);
     expect(isTokenVisible(parsed, toTokenId("g-inner"), foldOuterOnly, true)).toBe(false);
     expect(isTokenVisible(parsed, toTokenId("cn-top"), foldOuterOnly, true)).toBe(true);
