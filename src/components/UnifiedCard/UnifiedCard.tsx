@@ -6,6 +6,7 @@ import {
   findTokenNote,
   hasFoldableClauses,
   hasGapSlots,
+  hasLineBreakTargets,
   hasOmittedHints,
   isTokenVisible,
   setAllClausesFolded,
@@ -20,6 +21,7 @@ import type {
   FallbackGrammarCard,
   GapIndex,
   GrammarCard,
+  InlineConnector,
   MainToken,
   StructuredGrammarCard,
   SubToken,
@@ -129,6 +131,10 @@ function CardLegend({ theme }: { readonly theme: CardTheme }) {
           <i className="swatch swatch-obj" aria-hidden="true" />
           宾语
         </span>
+        <span>
+          <i className="swatch swatch-comp" aria-hidden="true" />
+          补语
+        </span>
       </div>
     );
   }
@@ -137,6 +143,7 @@ function CardLegend({ theme }: { readonly theme: CardTheme }) {
       <span className="leg-dark-subj">主语</span>
       <span className="leg-dark-pred">谓语</span>
       <span className="leg-dark-obj">宾语</span>
+      <span className="leg-dark-comp">补语</span>
     </div>
   );
 }
@@ -186,6 +193,7 @@ function StructuredCardView({
   const [foldedClauses, setFoldedClauses] = useState<FoldedClauses>(createEmptyFoldState);
   const [showGapLayer, setShowGapLayer] = useState(true);
   const [showOmitted, setShowOmitted] = useState(false);
+  const [lineBreakMode, setLineBreakMode] = useState(false);
   const [selectedId, setSelectedId] = useState<TokenId | null>(null);
   const [traceArcs, setTraceArcs] = useState<readonly TraceArc[]>([]);
   const [traceColors, setTraceColors] = useState<TraceColors>(DEFAULT_TRACE_COLORS);
@@ -202,6 +210,7 @@ function StructuredCardView({
   const markerPrefix = useId().replace(/:/g, "");
 
   const clausesPresent = hasFoldableClauses(card);
+  const lineBreakAvailable = hasLineBreakTargets(card);
   const gapsPresent = hasGapSlots(card);
   const omittedPresent = hasOmittedHints(card);
   const foldedNow = areAllClausesFolded(card, foldedClauses);
@@ -271,7 +280,7 @@ function StructuredCardView({
 
   useLayoutEffect(() => {
     recomputeTraces();
-  }, [recomputeTraces, card, theme, compact, foldedClauses, showOmitted]);
+  }, [recomputeTraces, card, theme, compact, foldedClauses, showOmitted, lineBreakMode]);
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -341,7 +350,28 @@ function StructuredCardView({
     );
   };
 
-  const renderClauseItem = (item: ClauseItem) => {
+  const renderInlineConnector = (connector: InlineConnector) => {
+    const isSelected = selectedId === connector.id;
+    return (
+      <Fragment key={connector.id}>
+        <span className="clause-badge conn-badge-static">
+          {connector.badge}
+          {connector.star ? <span className="star-sup">★</span> : null}
+        </span>
+        <span
+          className={`conn-oval conn-interactive${isSelected ? " selected" : ""}`}
+          data-tok-id={connector.id}
+          onClick={() => handleSelectToken(connector.id)}
+        >
+          {connector.text}
+          <ConnectorOvalSvg />
+          {connector.subLabel ? <span className="micro-sub conn">{connector.subLabel}</span> : null}
+        </span>
+      </Fragment>
+    );
+  };
+
+  const renderClauseItem = (item: ClauseItem, depth: number) => {
     switch (item.kind) {
       case "sub-token":
         return renderWordToken(item);
@@ -363,26 +393,10 @@ function StructuredCardView({
           </span>
         );
       }
-      case "connector": {
-        const isSelected = selectedId === item.id;
-        return (
-          <Fragment key={item.id}>
-            <span className="clause-badge">
-              {item.badge}
-              {item.star ? <span className="star-sup">★</span> : null}
-            </span>
-            <span
-              className={`conn-oval conn-interactive${isSelected ? " selected" : ""}`}
-              data-tok-id={item.id}
-              onClick={() => handleSelectToken(item.id)}
-            >
-              {item.text}
-              <ConnectorOvalSvg />
-              {item.subLabel ? <span className="micro-sub conn">{item.subLabel}</span> : null}
-            </span>
-          </Fragment>
-        );
-      }
+      case "connector":
+        return renderInlineConnector(item);
+      case "clause":
+        return renderClause(item, depth + 1);
       default: {
         const _exhaustive: never = item;
         return _exhaustive;
@@ -390,13 +404,13 @@ function StructuredCardView({
     }
   };
 
-  const renderClause = (clause: ClauseGroup) => {
+  const renderClause = (clause: ClauseGroup, depth = 1) => {
     if (foldedClauses.has(clause.id)) {
       return (
         <button
           key={clause.id}
           type="button"
-          className="fold-pill"
+          className={`fold-pill${depth > 1 ? " nested-fold-pill" : ""}`}
           data-fold-clause={clause.id}
           title="点击原位展开"
           onClick={() => handleToggleClause(clause.id)}
@@ -410,7 +424,12 @@ function StructuredCardView({
     const showClauseConnector = Boolean(clause.connector) && !hasLeadingInlineConnector;
 
     return (
-      <span key={clause.id} className="clause-box" data-clause-id={clause.id}>
+      <span
+        key={clause.id}
+        className={`clause-box${depth > 1 ? " nested-clause" : ""}`}
+        data-clause-id={clause.id}
+        data-clause-depth={String(depth)}
+      >
         <button
           type="button"
           className="clause-badge"
@@ -435,7 +454,7 @@ function StructuredCardView({
           </>
         ) : null}
         {clause.items.map((item, idx) => {
-          const rendered = renderClauseItem(item);
+          const rendered = renderClauseItem(item, depth);
           if (rendered === null) {
             return null;
           }
@@ -519,9 +538,16 @@ function StructuredCardView({
           <AudioIcon />
         </button>
 
-        <div className="sent-body">
+        <div className="sent-body" data-linebreak={lineBreakMode ? "true" : undefined}>
           {card.parts.map((part, idx) => {
             const leadingSpace = idx > 0 && part.kind !== "punct" ? " " : null;
+            const prevPart = idx > 0 ? card.parts[idx - 1] : undefined;
+            const shouldLineBreak =
+              lineBreakMode &&
+              idx > 0 &&
+              (part.kind === "connector" ||
+                (part.kind === "clause" && prevPart?.kind !== "connector"));
+
             switch (part.kind) {
               case "punct":
                 return <Fragment key={`punct-${idx}`}>{part.text}</Fragment>;
@@ -532,11 +558,20 @@ function StructuredCardView({
                     {renderWordToken(part)}
                   </Fragment>
                 );
+              case "connector":
+                return (
+                  <Fragment key={part.id}>
+                    {leadingSpace}
+                    {shouldLineBreak ? <br className="sent-linebreak" /> : null}
+                    {renderInlineConnector(part)}
+                  </Fragment>
+                );
               case "clause":
                 return (
                   <Fragment key={part.id}>
                     {leadingSpace}
-                    {renderClause(part)}
+                    {shouldLineBreak ? <br className="sent-linebreak" /> : null}
+                    {renderClause(part, 1)}
                   </Fragment>
                 );
               default: {
@@ -558,6 +593,16 @@ function StructuredCardView({
               onClick={handleToggleFoldAll}
             >
               {foldedNow ? "展开全部从句" : "折叠修饰看主干"}
+            </button>
+          ) : null}
+          {lineBreakAvailable ? (
+            <button
+              type="button"
+              className={`ctrl-btn${lineBreakMode ? " active" : ""}`}
+              data-action="toggle-linebreak"
+              onClick={() => setLineBreakMode((prev) => !prev)}
+            >
+              断句
             </button>
           ) : null}
           {gapsPresent ? (
@@ -596,7 +641,7 @@ function StructuredCardView({
           ) : null}
         </div>
         <div>{activeNote ? activeNote.note : card.recombination}</div>
-        {card.caveatNote ? <div className="caveat-strip">{card.caveatNote}</div> : null}
+        {card.caveatNote ? <div className="usage-note-strip">{card.caveatNote}</div> : null}
       </div>
     </article>
   );

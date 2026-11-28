@@ -17,6 +17,8 @@ import {
   isTokenId,
 } from "./types.ts";
 
+export const MAX_CLAUSE_DEPTH = 3;
+
 type ParseResult<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: string };
 
 function ok<T>(value: T): ParseResult<T> {
@@ -104,7 +106,7 @@ function parseTokenFields(
     return fail(`${path}.text must be a non-empty string`);
   }
   if (!isSyntacticRole(obj.role)) {
-    return fail(`${path}.role must be subj, pred, obj, or mod`);
+    return fail(`${path}.role must be subj, pred, obj, comp, or mod`);
   }
   if (typeof obj.note !== "string") {
     return fail(`${path}.note must be a string`);
@@ -185,7 +187,7 @@ function parseInlineConnector(obj: Record<string, unknown>, path: string): Parse
   });
 }
 
-function parseClauseItem(value: unknown, path: string): ParseResult<ClauseItem> {
+function parseClauseItem(value: unknown, path: string, depth: number): ParseResult<ClauseItem> {
   if (!isRecord(value)) {
     return fail(`${path} must be an object`);
   }
@@ -202,12 +204,21 @@ function parseClauseItem(value: unknown, path: string): ParseResult<ClauseItem> 
       return parseGapSlot(value, path);
     case "connector":
       return parseInlineConnector(value, path);
+    case "clause":
+      return parseClauseGroup(value, path, depth + 1);
     default:
-      return fail(`${path}.kind must be sub-token, gap, or connector`);
+      return fail(`${path}.kind must be sub-token, gap, connector, or clause`);
   }
 }
 
-function parseClauseGroup(obj: Record<string, unknown>, path: string): ParseResult<ClauseGroup> {
+function parseClauseGroup(
+  obj: Record<string, unknown>,
+  path: string,
+  depth = 1,
+): ParseResult<ClauseGroup> {
+  if (depth > MAX_CLAUSE_DEPTH) {
+    return fail(`${path} exceeds maximum clause depth of ${MAX_CLAUSE_DEPTH}`);
+  }
   if (!isClauseId(obj.id)) {
     return fail(`${path}.id must be a non-empty string`);
   }
@@ -232,7 +243,7 @@ function parseClauseGroup(obj: Record<string, unknown>, path: string): ParseResu
 
   const items: ClauseItem[] = [];
   for (let i = 0; i < obj.items.length; i += 1) {
-    const parsedItem = parseClauseItem(obj.items[i], `${path}.items[${i}]`);
+    const parsedItem = parseClauseItem(obj.items[i], `${path}.items[${i}]`, depth);
     if (!parsedItem.ok) {
       return parsedItem;
     }
@@ -272,11 +283,13 @@ function parseSentencePart(value: unknown, index: number): ParseResult<SentenceP
       return ok(token);
     }
     case "clause":
-      return parseClauseGroup(value, path);
+      return parseClauseGroup(value, path, 1);
+    case "connector":
+      return parseInlineConnector(value, path);
     case "punct":
       return parsePunctuationPart(value, path);
     default:
-      return fail(`${path}.kind must be token, clause, or punct`);
+      return fail(`${path}.kind must be token, clause, connector, or punct`);
   }
 }
 
@@ -317,6 +330,28 @@ function parseCaveatNote(value: unknown): ParseResult<string | null> {
   return ok(value.trim().length > 0 ? value : null);
 }
 
+function collectClauseAntecedents(clause: ClauseGroup, indices: Set<GapIndex>): void {
+  for (const item of clause.items) {
+    switch (item.kind) {
+      case "sub-token":
+        if (item.antecedentIndex !== undefined) {
+          indices.add(item.antecedentIndex);
+        }
+        break;
+      case "clause":
+        collectClauseAntecedents(item, indices);
+        break;
+      case "gap":
+      case "connector":
+        break;
+      default: {
+        const _exhaustive: never = item;
+        return _exhaustive;
+      }
+    }
+  }
+}
+
 function collectAntecedentIndices(parts: readonly SentencePart[]): Set<GapIndex> {
   const indices = new Set<GapIndex>();
   for (const part of parts) {
@@ -327,12 +362,9 @@ function collectAntecedentIndices(parts: readonly SentencePart[]): Set<GapIndex>
         }
         break;
       case "clause":
-        for (const item of part.items) {
-          if (item.kind === "sub-token" && item.antecedentIndex !== undefined) {
-            indices.add(item.antecedentIndex);
-          }
-        }
+        collectClauseAntecedents(part, indices);
         break;
+      case "connector":
       case "punct":
         break;
       default: {
@@ -344,18 +376,41 @@ function collectAntecedentIndices(parts: readonly SentencePart[]): Set<GapIndex>
   return indices;
 }
 
+function stripClauseOrphanGaps(
+  clause: ClauseGroup,
+  validIndices: ReadonlySet<GapIndex>,
+): ClauseGroup {
+  let changed = false;
+  const nextItems: ClauseItem[] = [];
+  for (const item of clause.items) {
+    if (item.kind === "gap") {
+      if (validIndices.has(item.index)) {
+        nextItems.push(item);
+      } else {
+        changed = true;
+      }
+      continue;
+    }
+    if (item.kind === "clause") {
+      const cleanedChild = stripClauseOrphanGaps(item, validIndices);
+      if (cleanedChild !== item) {
+        changed = true;
+      }
+      nextItems.push(cleanedChild);
+      continue;
+    }
+    nextItems.push(item);
+  }
+  return changed ? { ...clause, items: nextItems } : clause;
+}
+
 function stripOrphanGaps(parts: readonly SentencePart[]): readonly SentencePart[] {
   const validIndices = collectAntecedentIndices(parts);
   return parts.map((part): SentencePart => {
     if (part.kind !== "clause") {
       return part;
     }
-    const filteredItems = part.items.filter(
-      (item) => item.kind !== "gap" || validIndices.has(item.index),
-    );
-    return filteredItems.length === part.items.length
-      ? part
-      : { ...part, items: filteredItems };
+    return stripClauseOrphanGaps(part, validIndices);
   });
 }
 

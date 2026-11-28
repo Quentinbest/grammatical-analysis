@@ -387,4 +387,129 @@ describe("parseGrammarCard", () => {
       }
     }
   });
+
+  it("parses comp syntactic role, top-level connector, and nested clauses up to depth 3 while stripping nested orphan gaps", () => {
+    const raw = {
+      meaning: "我认为它不是唯一有能力造出它的实验室，而且那会很危险。",
+      parts: [
+        { kind: "token", id: "t1", text: "I", role: "subj", note: "主句主语。" },
+        {
+          kind: "token",
+          id: "t2",
+          text: "don't think",
+          role: "pred",
+          subLabel: "否定转移",
+          note: "主句否定谓语。",
+        },
+        {
+          kind: "clause",
+          id: "c1",
+          badge: "宾语从句",
+          omittedHint: "(that)",
+          items: [
+            { kind: "sub-token", id: "st1", text: "it", role: "subj", note: "从句主语。" },
+            { kind: "sub-token", id: "st2", text: "is", role: "pred", note: "系动词。" },
+            {
+              kind: "sub-token",
+              id: "st3",
+              text: "the only lab",
+              role: "comp",
+              antecedentIndex: 1,
+              note: "主语补语，同时是内层定语从句先行词。",
+            },
+            {
+              kind: "clause",
+              id: "c2",
+              badge: "定语从句",
+              connector: "that",
+              items: [
+                { kind: "connector", id: "cn1", text: "that", badge: "关系代词", note: "引导定语从句。" },
+                { kind: "gap", id: "g1", index: 1, note: "指代 the only lab。" },
+                { kind: "gap", id: "g-orphan", index: 3, note: "孤立空位，应被递归清理。" },
+                { kind: "sub-token", id: "st4", text: "can build", role: "pred", note: "内层谓语。" },
+                {
+                  kind: "clause",
+                  id: "c3",
+                  badge: "名词子句",
+                  items: [
+                    { kind: "sub-token", id: "st5", text: "what matters", role: "obj", note: "第三层从句。" },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        { kind: "punct", text: "," },
+        { kind: "connector", id: "cn-top", text: "and", badge: "并列连词", note: "连接第二个并列分句。" },
+        { kind: "token", id: "t3", text: "that", role: "subj", note: "指示代词作主语。" },
+        { kind: "token", id: "t4", text: "'d be", role: "pred", note: "虚拟系动词。" },
+        { kind: "token", id: "t5", text: "risky", role: "comp", note: "形容词主语补语。" },
+        { kind: "punct", text: "." },
+      ],
+      recombination: "主干 I don't think + 宾语从句（内嵌定语从句）+ and 并列分句。",
+    };
+
+    const card = parseGrammarCard(raw, "I don't think it is the only lab that can build what matters, and that'd be risky.");
+    expect(card.kind).toBe("structured");
+    if (card.kind !== "structured") {
+      return;
+    }
+
+    const c1 = card.parts[2];
+    expect(c1?.kind).toBe("clause");
+    if (c1?.kind === "clause") {
+      const c2 = c1.items[3];
+      expect(c2?.kind).toBe("clause");
+      if (c2?.kind === "clause") {
+        expect(c2.items.map((item) => item.id)).toEqual(["cn1", "g1", "st4", "c3"]);
+      }
+    }
+
+    const topConn = card.parts[4];
+    expect(topConn?.kind).toBe("connector");
+    const lastComp = card.parts[7];
+    expect(lastComp?.kind === "token" && lastComp.role).toBe("comp");
+  });
+
+  it("rejects clause nesting deeper than MAX_CLAUSE_DEPTH (depth 4) cleanly to FallbackGrammarCard", () => {
+    const tooDeep = {
+      meaning: "嵌套过深测试。",
+      parts: [
+        {
+          kind: "clause",
+          id: "c1",
+          badge: "L1",
+          items: [
+            {
+              kind: "clause",
+              id: "c2",
+              badge: "L2",
+              items: [
+                {
+                  kind: "clause",
+                  id: "c3",
+                  badge: "L3",
+                  items: [
+                    {
+                      kind: "clause",
+                      id: "c4",
+                      badge: "L4",
+                      items: [{ kind: "sub-token", id: "st1", text: "x", role: "subj", note: "n" }],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      recombination: "不应通过。",
+    };
+
+    const card = parseGrammarCard(tooDeep, "Too deep.");
+    expect(card.kind).toBe("fallback");
+    if (card.kind === "fallback") {
+      expect(card.parseError).toContain("exceeds maximum clause depth");
+    }
+  });
 });

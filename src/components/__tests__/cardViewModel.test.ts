@@ -5,12 +5,14 @@ import {
   findTokenNote,
   hasFoldableClauses,
   hasGapSlots,
+  hasLineBreakTargets,
   hasOmittedHints,
   isTokenVisible,
   setAllClausesFolded,
   shouldDrawGapArc,
   toggleClauseFold,
 } from "../../domain/cardViewModel.ts";
+import { parseGrammarCard } from "../../domain/parseCard.ts";
 import {
   COMPLEX_34_WORD_CARD,
   SIMPLE_CARD,
@@ -104,5 +106,86 @@ describe("cardViewModel", () => {
     expect(isTokenVisible(SINGLE_GAP_CARD, toTokenId("g1"), empty, true)).toBe(true);
     expect(isTokenVisible(SINGLE_GAP_CARD, toTokenId("g1"), empty, false)).toBe(false);
     expect(isTokenVisible(SINGLE_GAP_CARD, toTokenId("g1"), foldC1, true)).toBe(false);
+  });
+
+  it("recurses across nested ClauseGroup items and top-level InlineConnector parts", () => {
+    const parsed = parseGrammarCard(
+      {
+        meaning: "我不认为它是唯一能做到这一点的实验室，而且那样做很冒险。",
+        parts: [
+          { kind: "token", id: "t1", text: "I", role: "subj", note: "主语。" },
+          { kind: "token", id: "t2", text: "don't think", role: "pred", note: "谓语。" },
+          {
+            kind: "clause",
+            id: "c-outer",
+            badge: "宾语从句",
+            items: [
+              { kind: "sub-token", id: "st1", text: "it", role: "subj", note: "从句主语。" },
+              { kind: "sub-token", id: "st2", text: "is", role: "pred", note: "系动词。" },
+              {
+                kind: "sub-token",
+                id: "st3",
+                text: "the only lab",
+                role: "comp",
+                antecedentIndex: 1,
+                note: "补语。",
+              },
+              {
+                kind: "clause",
+                id: "c-inner",
+                badge: "定语从句",
+                omittedHint: "(that)",
+                items: [
+                  { kind: "sub-token", id: "st-inner", text: "we", role: "subj", note: "内层主语说明。" },
+                  { kind: "sub-token", id: "st-pred", text: "trust", role: "pred", note: "内层谓语。" },
+                  { kind: "gap", id: "g-inner", index: 1, note: "内层空位说明。" },
+                ],
+              },
+            ],
+          },
+          { kind: "punct", text: "," },
+          { kind: "connector", id: "cn-top", text: "and", badge: "并列连词", note: "并列连接说明。" },
+          { kind: "token", id: "t3", text: "that", role: "subj", note: "并列主语。" },
+          { kind: "token", id: "t4", text: "matters", role: "pred", note: "并列谓语。" },
+          { kind: "punct", text: "." },
+        ],
+        recombination: "嵌套从句与并列连词测试。",
+      },
+      "I don't think it is the only lab we trust, and that matters.",
+    );
+
+    expect(parsed.kind).toBe("structured");
+    if (parsed.kind !== "structured") {
+      return;
+    }
+
+    expect(hasLineBreakTargets(SIMPLE_CARD)).toBe(false);
+    expect(hasLineBreakTargets(parsed)).toBe(true);
+    expect(hasGapSlots(parsed)).toBe(true);
+    expect(hasOmittedHints(parsed)).toBe(true);
+
+    const foldAll = setAllClausesFolded(parsed, true);
+    expect(foldAll.has(toClauseId("c-outer"))).toBe(true);
+    expect(foldAll.has(toClauseId("c-inner"))).toBe(true);
+    expect(areAllClausesFolded(parsed, foldAll)).toBe(true);
+
+    // Folding ONLY outer clause hides inner tokens and inner gaps even if inner clause is not in folded set
+    const foldOuterOnly = toggleClauseFold(createEmptyFoldState(), toClauseId("c-outer"));
+    expect(isTokenVisible(parsed, toTokenId("st-inner"), foldOuterOnly, true)).toBe(false);
+    expect(isTokenVisible(parsed, toTokenId("g-inner"), foldOuterOnly, true)).toBe(false);
+    expect(isTokenVisible(parsed, toTokenId("cn-top"), foldOuterOnly, true)).toBe(true);
+
+    expect(findTokenNote(parsed, toTokenId("st-inner"))).toEqual({
+      title: "we",
+      note: "内层主语说明。",
+    });
+    expect(findTokenNote(parsed, toTokenId("g-inner"))).toEqual({
+      title: "空位 □1",
+      note: "内层空位说明。",
+    });
+    expect(findTokenNote(parsed, toTokenId("cn-top"))).toEqual({
+      title: "and",
+      note: "并列连接说明。",
+    });
   });
 });
