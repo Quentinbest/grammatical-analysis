@@ -101,6 +101,43 @@ impl Storage {
             )?;
         }
 
+        const LEGACY_PROVIDER_UPGRADES: &[(&str, &str, &str, &str)] = &[
+            ("prov-openai", "OpenAI · GPT-6.2 Sol", "gpt-6.2-sol", "gpt-4.1-mini"),
+            (
+                "prov-anthropic",
+                "Anthropic · Claude Sonnet 5.5",
+                "claude-sonnet-5-5",
+                "claude-sonnet-4-5",
+            ),
+            (
+                "provider-openrouter",
+                "OpenRouter · Claude Sonnet 5.5",
+                "anthropic/claude-sonnet-5.5",
+                "anthropic/claude-sonnet-4",
+            ),
+            (
+                "provider-deepseek",
+                "DeepSeek · DeepSeek V4.1 Flash",
+                "deepseek-v4.1-flash-1017",
+                "deepseek-chat",
+            ),
+            (
+                "provider-gemini",
+                "Google · Gemini 3.8 Flash",
+                "gemini-3.8-flash",
+                "gemini-2.5-flash",
+            ),
+        ];
+
+        for &(id, new_name, new_model, legacy_model) in LEGACY_PROVIDER_UPGRADES {
+            conn.execute(
+                "UPDATE providers
+                 SET name = ?2, model = ?3, updated_at = ?5
+                 WHERE id = ?1 AND model = ?4",
+                params![id, new_name, new_model, legacy_model, now],
+            )?;
+        }
+
         for action in default_actions() {
             let render_mode = render_mode_to_str(action.render_mode);
             let is_built_in = if action.is_built_in { 1i64 } else { 0i64 };
@@ -422,51 +459,100 @@ pub fn default_providers() -> Vec<ProviderConfig> {
     vec![
         ProviderConfig::Ollama {
             id: "prov-ollama".into(),
-            name: "Local Ollama".into(),
+            name: "Ollama · Qwen 2.5 14B".into(),
             base_url: "http://localhost:11434".into(),
             model: "qwen2.5:14b".into(),
         },
         ProviderConfig::OpenaiCompatible {
             id: "prov-lmstudio".into(),
-            name: "Local LM Studio".into(),
+            name: "LM Studio · Qwen 2.5 14B".into(),
             base_url: "http://localhost:1234/v1".into(),
             api_key_ref: String::new(),
             model: "qwen2.5-14b-instruct".into(),
         },
         ProviderConfig::OpenaiCompatible {
             id: "prov-openai".into(),
-            name: "Cloud OpenAI".into(),
+            name: "OpenAI · GPT-6.2 Sol".into(),
             base_url: "https://api.openai.com/v1".into(),
             api_key_ref: "key:openai".into(),
-            model: "gpt-4.1-mini".into(),
+            model: "gpt-6.2-sol".into(),
+        },
+        ProviderConfig::OpenaiCompatible {
+            id: "prov-openai-gpt6-luna".into(),
+            name: "OpenAI · GPT-6 Luna".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key_ref: "key:openai".into(),
+            model: "gpt-6-luna".into(),
+        },
+        ProviderConfig::OpenaiCompatible {
+            id: "prov-openai-gpt62-astra".into(),
+            name: "OpenAI · GPT-6.2 Astra".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key_ref: "key:openai".into(),
+            model: "gpt-6.2-astra".into(),
         },
         ProviderConfig::Anthropic {
             id: "prov-anthropic".into(),
-            name: "Cloud Anthropic".into(),
+            name: "Anthropic · Claude Sonnet 5.5".into(),
             base_url: "https://api.anthropic.com".into(),
             api_key_ref: "key:anthropic".into(),
-            model: "claude-sonnet-4-5".into(),
+            model: "claude-sonnet-5-5".into(),
         },
-        ProviderConfig::OpenaiCompatible {
-            id: "provider-openrouter".into(),
-            name: "Cloud · OpenRouter (Claude Sonnet 4)".into(),
-            base_url: "https://openrouter.ai/api/v1".into(),
-            api_key_ref: "openrouter".into(),
-            model: "anthropic/claude-sonnet-4".into(),
+        ProviderConfig::Anthropic {
+            id: "prov-anthropic-haiku-55".into(),
+            name: "Anthropic · Claude Haiku 5.5".into(),
+            base_url: "https://api.anthropic.com".into(),
+            api_key_ref: "key:anthropic".into(),
+            model: "claude-haiku-5-5".into(),
+        },
+        ProviderConfig::Anthropic {
+            id: "prov-anthropic-opus-55".into(),
+            name: "Anthropic · Claude Opus 5.5".into(),
+            base_url: "https://api.anthropic.com".into(),
+            api_key_ref: "key:anthropic".into(),
+            model: "claude-opus-5-5".into(),
         },
         ProviderConfig::OpenaiCompatible {
             id: "provider-deepseek".into(),
-            name: "Cloud · DeepSeek (deepseek-chat)".into(),
+            name: "DeepSeek · DeepSeek V4.1 Flash".into(),
             base_url: "https://api.deepseek.com/v1".into(),
             api_key_ref: "deepseek".into(),
-            model: "deepseek-chat".into(),
+            model: "deepseek-v4.1-flash-1017".into(),
+        },
+        ProviderConfig::OpenaiCompatible {
+            id: "prov-deepseek-v4-pro".into(),
+            name: "DeepSeek · DeepSeek V4 Pro".into(),
+            base_url: "https://api.deepseek.com/v1".into(),
+            api_key_ref: "deepseek".into(),
+            model: "deepseek-v4-pro".into(),
         },
         ProviderConfig::OpenaiCompatible {
             id: "provider-gemini".into(),
-            name: "Cloud · Gemini (gemini-2.5-flash)".into(),
+            name: "Google · Gemini 3.8 Flash".into(),
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
             api_key_ref: "gemini".into(),
-            model: "gemini-2.5-flash".into(),
+            model: "gemini-3.8-flash".into(),
+        },
+        ProviderConfig::OpenaiCompatible {
+            id: "prov-gemini-4-hydrogen".into(),
+            name: "Google · Gemini 4 Hydrogen".into(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+            api_key_ref: "gemini".into(),
+            model: "gemini-4-hydrogen".into(),
+        },
+        ProviderConfig::OpenaiCompatible {
+            id: "prov-gemini-4-carbon".into(),
+            name: "Google · Gemini 4 Carbon".into(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+            api_key_ref: "gemini".into(),
+            model: "gemini-4-carbon".into(),
+        },
+        ProviderConfig::OpenaiCompatible {
+            id: "provider-openrouter".into(),
+            name: "OpenRouter · Claude Sonnet 5.5".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            api_key_ref: "openrouter".into(),
+            model: "anthropic/claude-sonnet-5.5".into(),
         },
     ]
 }
@@ -603,39 +689,39 @@ mod tests {
         storage.seed_defaults().expect("second seed must succeed");
 
         let providers = storage.list_providers().expect("list providers");
-        assert_eq!(providers.len(), 7);
+        assert_eq!(providers.len(), 14);
         assert!(providers.iter().any(|p| matches!(p, ProviderConfig::Ollama { id, .. } if id == "prov-ollama")));
         assert!(providers.iter().any(|p| matches!(p, ProviderConfig::OpenaiCompatible { id, .. } if id == "prov-lmstudio")));
-        assert!(providers.iter().any(|p| matches!(p, ProviderConfig::OpenaiCompatible { id, .. } if id == "prov-openai")));
-        assert!(providers.iter().any(|p| matches!(p, ProviderConfig::Anthropic { id, .. } if id == "prov-anthropic")));
+        assert!(providers.iter().any(|p| matches!(p, ProviderConfig::OpenaiCompatible { id, model, .. } if id == "prov-openai" && model == "gpt-6.2-sol")));
+        assert!(providers.iter().any(|p| matches!(p, ProviderConfig::Anthropic { id, model, .. } if id == "prov-anthropic-haiku-55" && model == "claude-haiku-5-5")));
         assert_eq!(
             storage.get_provider("provider-openrouter").expect("get openrouter"),
             Some(ProviderConfig::OpenaiCompatible {
                 id: "provider-openrouter".into(),
-                name: "Cloud · OpenRouter (Claude Sonnet 4)".into(),
+                name: "OpenRouter · Claude Sonnet 5.5".into(),
                 base_url: "https://openrouter.ai/api/v1".into(),
                 api_key_ref: "openrouter".into(),
-                model: "anthropic/claude-sonnet-4".into(),
+                model: "anthropic/claude-sonnet-5.5".into(),
             })
         );
         assert_eq!(
             storage.get_provider("provider-deepseek").expect("get deepseek"),
             Some(ProviderConfig::OpenaiCompatible {
                 id: "provider-deepseek".into(),
-                name: "Cloud · DeepSeek (deepseek-chat)".into(),
+                name: "DeepSeek · DeepSeek V4.1 Flash".into(),
                 base_url: "https://api.deepseek.com/v1".into(),
                 api_key_ref: "deepseek".into(),
-                model: "deepseek-chat".into(),
+                model: "deepseek-v4.1-flash-1017".into(),
             })
         );
         assert_eq!(
             storage.get_provider("provider-gemini").expect("get gemini"),
             Some(ProviderConfig::OpenaiCompatible {
                 id: "provider-gemini".into(),
-                name: "Cloud · Gemini (gemini-2.5-flash)".into(),
+                name: "Google · Gemini 3.8 Flash".into(),
                 base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
                 api_key_ref: "gemini".into(),
-                model: "gemini-2.5-flash".into(),
+                model: "gemini-3.8-flash".into(),
             })
         );
 
@@ -643,6 +729,53 @@ mod tests {
         assert_eq!(actions.len(), 2);
         assert!(actions.iter().any(|a| a.id == "act-english-structure" && a.render_mode == RenderMode::Unified3Layer));
         assert!(actions.iter().any(|a| a.id == "act-compact-html" && a.render_mode == RenderMode::CustomHtml));
+    }
+
+    #[test]
+    fn upgrades_legacy_unedited_default_models_while_preserving_custom_edits() {
+        let storage = Storage::open_in_memory().expect("open storage");
+
+        storage
+            .upsert_provider(&ProviderConfig::OpenaiCompatible {
+                id: "prov-openai".into(),
+                name: "Cloud OpenAI".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                api_key_ref: "key:openai".into(),
+                model: "gpt-4.1-mini".into(),
+            })
+            .expect("insert legacy openai");
+        storage
+            .upsert_provider(&ProviderConfig::Anthropic {
+                id: "prov-anthropic".into(),
+                name: "My Custom Claude".into(),
+                base_url: "https://api.anthropic.com".into(),
+                api_key_ref: "key:anthropic".into(),
+                model: "my-custom-claude-endpoint".into(),
+            })
+            .expect("insert custom anthropic");
+
+        storage.seed_defaults().expect("re-run seed_defaults");
+
+        assert_eq!(
+            storage.get_provider("prov-openai").expect("get openai"),
+            Some(ProviderConfig::OpenaiCompatible {
+                id: "prov-openai".into(),
+                name: "OpenAI · GPT-6.2 Sol".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                api_key_ref: "key:openai".into(),
+                model: "gpt-6.2-sol".into(),
+            })
+        );
+        assert_eq!(
+            storage.get_provider("prov-anthropic").expect("get anthropic"),
+            Some(ProviderConfig::Anthropic {
+                id: "prov-anthropic".into(),
+                name: "My Custom Claude".into(),
+                base_url: "https://api.anthropic.com".into(),
+                api_key_ref: "key:anthropic".into(),
+                model: "my-custom-claude-endpoint".into(),
+            })
+        );
     }
 
     #[test]
